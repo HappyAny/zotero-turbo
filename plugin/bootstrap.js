@@ -41,6 +41,10 @@ const ZOT_TURBO_DEFAULTS = {
   noteWebpQuality: 85,
   noteWebpMinKB: 64,
   noteWebpMaxDim: 2560,
+  // Module 7: Main UI Fluidity (ItemPane Selection Coalescing & 120Hz Virtualized Overscan)
+  itemSelectCoalesceEnabled: true,
+  itemSelectDebounceMs: 75,
+  itemTreeOverscan: 6,
   // Internal migration flag
   migratedLegacyMuPDF: false,
 };
@@ -164,6 +168,7 @@ async function startup({ id, version, rootURI }) {
     Services.scriptloader.loadSubScript(rootURI + "src/search-accel.js", globalThis);
     Services.scriptloader.loadSubScript(rootURI + "src/cite-accel.js", globalThis);
     Services.scriptloader.loadSubScript(rootURI + "src/system-accel.js", globalThis);
+    Services.scriptloader.loadSubScript(rootURI + "src/ui-accel.js", globalThis);
     Services.scriptloader.loadSubScript(rootURI + "src/benchmark.js", globalThis);
 
     // Detect whether legacy standalone zotero-mupdf-engine is still installed & active
@@ -209,6 +214,7 @@ async function startup({ id, version, rootURI }) {
     });
     const citeAccel = new globalThis.ZotTurboCiteAccel.CiteAccelerator({ getPref });
     const systemAccel = new globalThis.ZotTurboSystemAccel.SystemAccelerator({ getPref });
+    const uiAccel = new globalThis.ZotTurboUIAccel.UIAccelerator({ getPref });
 
     const plugin = {
       id,
@@ -230,6 +236,7 @@ async function startup({ id, version, rootURI }) {
       searchAccel,
       citeAccel,
       systemAccel,
+      uiAccel,
       getSummary() {
         const renderSummary = renderEngine
           ? renderEngine.getSummary()
@@ -249,6 +256,7 @@ async function startup({ id, version, rootURI }) {
           search: searchAccel.getStats(),
           cite: citeAccel.getStats(),
           system: systemAccel.getStats(),
+          ui: uiAccel.getStats(),
         };
       },
       async restartRenderEngine() {
@@ -394,7 +402,7 @@ async function startup({ id, version, rootURI }) {
     ZotTurboPlugin = plugin;
     Zotero.ZotTurbo = plugin;
 
-    // Initialize all 6 modules
+    // Initialize all 7 modules
     if (renderHook) {
       await renderHook.init();
     }
@@ -403,6 +411,7 @@ async function startup({ id, version, rootURI }) {
     searchAccel.init();
     citeAccel.init();
     await systemAccel.init();
+    uiAccel.init();
 
     // Register native Zotero Preferences Pane
     if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
@@ -443,6 +452,7 @@ function onMainWindowLoad({ window }) {
   try {
     ZotTurboPlugin?.renderHook?._scanAllReaders?.();
     ZotTurboPlugin?.tabHibernator?.attachWindow(window);
+    ZotTurboPlugin?.uiAccel?.attachWindow(window);
     ZotTurboPlugin?.pdfTextAccel?.scanAllReaders();
   } catch {}
 }
@@ -450,6 +460,7 @@ function onMainWindowLoad({ window }) {
 function onMainWindowUnload({ window }) {
   try {
     ZotTurboPlugin?.tabHibernator?.detachWindow(window);
+    ZotTurboPlugin?.uiAccel?.detachWindow(window);
   } catch {}
 }
 
@@ -468,6 +479,7 @@ async function shutdown() {
       delete Zotero.ZotTurbo;
     }
     // Strict reverse-init (LIFO) shutdown so chained hooks on Zotero.Reader.open restore cleanly
+    try { p.uiAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.pdfTextAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.renderHook?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.tabHibernator?.shutdown(); } catch (e) { Zotero.logError(e); }
@@ -493,5 +505,6 @@ async function shutdown() {
   globalThis.ZotTurboSearchAccel = undefined;
   globalThis.ZotTurboCiteAccel = undefined;
   globalThis.ZotTurboSystemAccel = undefined;
+  globalThis.ZotTurboUIAccel = undefined;
   globalThis.ZotTurboBenchmark = undefined;
 }

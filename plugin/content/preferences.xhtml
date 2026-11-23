@@ -11,7 +11,7 @@
         <html:span id="zt-badge-status" class="zt-badge zt-badge-ok">检测中...</html:span>
       </html:div>
       <html:p class="zt-subtitle">
-        单原生 MuPDF 1.28.0 DLL 统一驱动 6 大性能引擎：PDF 与缩略图原生渲染、PDF 全文索引与文本层、智能后台标签休眠、多线程全文扫描与搜索缓存、引文 CSL 加速、SQLite 调优与笔记图片 WebP 压缩。
+        单原生 MuPDF 1.28.0 DLL 统一驱动 7 大性能引擎：PDF 与缩略图原生渲染、PDF 全文索引与文本层、智能后台标签休眠、多线程全文扫描与搜索缓存、引文 CSL 加速、SQLite 调优与笔记图片 WebP 压缩、主界面 120Hz 交互流畅度优化。
       </html:p>
       <html:div id="zt-conflict-banner" class="zt-alert" style="display:none;">
         检测到旧版独立 <html:strong>Zotero MuPDF Engine</html:strong> 插件仍在运行。为避免重复挂钩，Zotero Turbo 已自动让出渲染接管权；建议在「工具 → 插件」中卸载旧版独立插件并重启 Zotero，即可享受单 DLL 合一的更低内存占用。
@@ -64,6 +64,10 @@
           <html:div class="zt-metric-label">🖼️ 笔记图片 WebP 瘦身</html:div>
           <html:div id="zt-stat-webp" class="zt-metric-val">-</html:div>
         </html:div>
+        <html:div class="zt-metric zt-metric-wide">
+          <html:div class="zt-metric-label">🖱️ 主界面流畅度 (选区合并防抖 / 列表预渲)</html:div>
+          <html:div id="zt-stat-ui" class="zt-metric-val">-</html:div>
+        </html:div>
       </html:div>
     </html:div>
 
@@ -115,7 +119,7 @@
           <menulist id="zt-mupdf-maxOutputScale" native="true" class="zt-menulist">
             <menupopup>
               <menuitem value="native" label="原生满分辨率 (最清晰)"/>
-              <menuitem value="1.5" label="1.5× (2K/4K 屏省 40% 显存)"/>
+              <menuitem value="1.5" label="1.5× (推荐 2K/4K 高刷屏，省 44% 显存与耗时)"/>
               <menuitem value="1.25" label="1.25× (轻量极速)"/>
               <menuitem value="1.0" label="1.0× (最低显存)"/>
             </menupopup>
@@ -289,6 +293,25 @@
         <html:button id="zt-btn-scan-note-png" type="button" class="zt-btn">扫描历史笔记 PNG</html:button>
         <html:button id="zt-btn-compress-note-png" type="button" class="zt-btn" disabled="disabled">确认批量转 WebP</html:button>
         <html:span id="zt-note-webp-status" class="zt-hint">先只读扫描历史笔记 PNG/BMP 截图，确认后再按 Zotero 事务批量转 WebP（兼容同步）。</html:span>
+      </html:div>
+    </html:div>
+
+    <!-- Module 7: Main UI Fluidity -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">7. 主界面 120Hz 交互流畅度 &amp; 列表滚动优化</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-itemSelectCoalesceEnabled" type="checkbox"/>
+        <html:span>连续快速切文献合并防抖 (单击文献 0 延迟秒开，长按方向键或快速连点时自动合并中间冗余的右侧栏与插件重绘)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid">
+        <html:label class="zt-field">
+          <html:span>连切合并窗口 (ms，推荐 60–100)</html:span>
+          <html:input id="zt-pref-itemSelectDebounceMs" type="number" min="0" max="300" step="15"/>
+        </html:label>
+        <html:label class="zt-field">
+          <html:span>文献列表虚拟滚动预渲行数 (Zotero 默认 2，推荐 6)</html:span>
+          <html:input id="zt-pref-itemTreeOverscan" type="number" min="2" max="16" step="1"/>
+        </html:label>
       </html:div>
     </html:div>
 

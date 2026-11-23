@@ -30,6 +30,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
     "src/search-accel.js",
     "src/cite-accel.js",
     "src/system-accel.js",
+    "src/ui-accel.js",
     "src/benchmark.js",
     "content/preferences.js",
   ];
@@ -39,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.7.2");
+  assert.equal(manifest.version, "0.8.0");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -61,6 +62,10 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(xhtml.includes('id="zt-pref-batchIndexParallelEnabled"'), "Expected batch index checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-autoBackgroundSlimEnabled"'), "Expected autoBackgroundSlim checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-autoBackgroundSlimMin"'), "Expected autoBackgroundSlimMin input in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-itemSelectCoalesceEnabled"'), "Expected itemSelectCoalesceEnabled checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-itemSelectDebounceMs"'), "Expected itemSelectDebounceMs input in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-itemTreeOverscan"'), "Expected itemTreeOverscan input in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-stat-ui"'), "Expected zt-stat-ui metric in preferences.xhtml");
   assert.ok(
     !/<(div|span|button|input|label|h2|p|hr|strong|select|option|table)\b/.test(xhtml),
     "Unprefixed HTML tag found in XUL XHTML!"
@@ -72,7 +77,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.7.2 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.8.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -1639,4 +1644,120 @@ console.log("=== [Check 14] v0.7.0 features: Background auto-slim & Reader capsu
   console.log("  PASS: Background auto-slim + Xray-safe native XUL capsule menu + Shift+click cold-reset verified");
 }
 
-console.log("\n[ALL 14 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 15] v0.8.0 features: Main UI selection coalescing, ItemTree overscan & async OffscreenCanvas thumbs ===");
+{
+  const renderedIds = [];
+  const jsWin = { overscanCount: 2 };
+  const origItemSelected = async function (id) {
+    renderedIds.push(id);
+    return true;
+  };
+  const mockWin = {
+    closed: false,
+    Zotero_Tabs: { selectedType: "library" },
+    ZoteroPane: {
+      itemSelected: origItemSelected,
+      itemsView: { tree: { _jsWindow: jsWin } },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  const uiCtx = vm.createContext({
+    Zotero: {
+      getMainWindows: () => [mockWin],
+      Notifier: { registerObserver: () => 42, unregisterObserver() {} },
+    },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }) },
+  });
+  loadScriptInContext("src/ui-accel.js", uiCtx);
+  const uiAccel = new uiCtx.ZotTurboUIAccel.UIAccelerator({
+    getPref: (k, d) => ({ itemSelectCoalesceEnabled: true, itemSelectDebounceMs: 40, itemTreeOverscan: 7 }[k] ?? d),
+  });
+  uiAccel.init();
+
+  assert.equal(jsWin.overscanCount, 7, "UIAccelerator must raise ItemTree overscanCount to configured value");
+  assert.notEqual(mockWin.ZoteroPane.itemSelected, origItemSelected, "ZoteroPane.itemSelected must be wrapped");
+
+  // 1. First selection executes immediately (leading edge = 0ms lag!)
+  const r1 = await mockWin.ZoteroPane.itemSelected("item-1");
+  assert.equal(r1, true);
+  assert.deepEqual(renderedIds, ["item-1"], "First single click must execute immediately");
+
+  // 2. Rapid burst (4 consecutive arrow presses within debounce window) coalesces to ONLY the final item
+  const p2 = mockWin.ZoteroPane.itemSelected("item-2");
+  const p3 = mockWin.ZoteroPane.itemSelected("item-3");
+  const p4 = mockWin.ZoteroPane.itemSelected("item-4");
+  const p5 = mockWin.ZoteroPane.itemSelected("item-5");
+  const results = await Promise.all([p2, p3, p4, p5]);
+  assert.deepEqual(results, [false, false, false, true], "Superseded intermediate selections resolve false; final resolves true");
+  assert.deepEqual(renderedIds, ["item-1", "item-5"], "Intermediate ItemPane rebuilds must be coalesced away");
+  assert.equal(uiAccel.getStats().coalescedSelections, 3, "Stats must record 3 coalesced selections");
+
+  // 3. Shutdown restores original ZoteroPane.itemSelected and overscanCount cleanly
+  uiAccel.shutdown();
+  assert.equal(mockWin.ZoteroPane.itemSelected, origItemSelected, "shutdown() must unwrap ZoteroPane.itemSelected");
+  assert.equal(jsWin.overscanCount, 2, "shutdown() must restore original ItemTree overscanCount");
+
+  // 4. Verify async OffscreenCanvas.convertToBlob thumbnail encoding + dirty-checked toolbar DOM in reader-hook.js
+  let convertToBlobCalls = 0;
+  let titleWrites = 0;
+  const mockChromeWin = {
+    ImageData: class {
+      constructor(arr, w, h) { this.data = arr; this.width = w; this.height = h; }
+    },
+    OffscreenCanvas: class {
+      constructor(w, h) { this.width = w; this.height = h; }
+      getContext() { return { putImageData() {} }; }
+      async convertToBlob(opts) {
+        convertToBlobCalls++;
+        assert.equal(opts.type, "image/jpeg");
+        return { size: 128, _fake: true };
+      }
+    },
+    FileReader: class {
+      readAsDataURL() {
+        this.result = "data:image/jpeg;base64,ZmFrZQ==";
+        setTimeout(() => this.onload?.(), 0);
+      }
+    },
+  };
+  const rhCtx2 = vm.createContext({
+    Zotero: { Reader: { _readers: [] }, Notifier: { registerObserver: () => 1, unregisterObserver() {} }, File: { getResourceAsync: async () => "" }, debug() {} },
+    Services: { wm: { getMostRecentWindow: () => mockChromeWin } },
+    Components: { utils: { cloneInto: (x) => x, exportFunction: (f) => f, unwaiveXrays: (x) => x } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+  });
+  loadScriptInContext("src/reader-hook.js", rhCtx2);
+  const rh2 = new rhCtx2.ZotMuPDFReaderHook.ReaderHook({
+    pluginID: "zt",
+    rootURI: "file:///",
+    engineClient: { onStatsChange: () => () => {}, isEnabled: () => true, getSummary: () => ({ enabled: true, ready: true, totalRenders: 1, lastE2EMs: 3.1, avgE2EMs: 3.1, pixHits: 1, fallbacks: 0 }) },
+  });
+  const dataUrl = await rh2._encodeThumbJpegAsync(new ArrayBuffer(16), 2, 2);
+  assert.equal(convertToBlobCalls, 1, "Thumbnail encoding must prefer async OffscreenCanvas.convertToBlob()");
+  assert.equal(dataUrl, "data:image/jpeg;base64,ZmFrZQ==");
+
+  const fakeBtn = {
+    isConnected: true,
+    _t: "",
+    set title(v) { titleWrites++; this._t = v; },
+    get title() { return this._t; },
+  };
+  const fakeRec = {
+    doc: { defaultView: { closed: false } },
+    btn: fakeBtn,
+    nameEl: { textContent: "" },
+    dot: { style: { backgroundColor: "" } },
+    metricEl: { textContent: "" },
+  };
+  const sameSummary = { enabled: true, ready: true, totalRenders: 1, lastE2EMs: 3.1, avgE2EMs: 3.1, pixHits: 1, fallbacks: 0 };
+  rh2._applyButtonState(fakeRec, sameSummary);
+  rh2._applyButtonState(fakeRec, sameSummary);
+  rh2._applyButtonState(fakeRec, sameSummary);
+  assert.equal(titleWrites, 1, "Dirty-checked _applyButtonState must not rewrite unchanged DOM properties");
+
+  console.log("  PASS: Main UI selection coalescing + ItemTree overscan + async OffscreenCanvas thumbs + dirty-checked capsule verified");
+}
+
+console.log("\n[ALL 15 VERIFICATION SUITES PASSED]");

@@ -55,6 +55,7 @@ var ZotTurboPrefs = (function () {
     "citeUseCiteprocRs",
     "sqliteTuneEnabled",
     "noteWebpEnabled",
+    "itemSelectCoalesceEnabled",
   ];
 
   const INT_KEYS = [
@@ -68,6 +69,8 @@ var ZotTurboPrefs = (function () {
     "noteWebpQuality",
     "noteWebpMinKB",
     "noteWebpMaxDim",
+    "itemSelectDebounceMs",
+    "itemTreeOverscan",
   ];
 
   let refreshTimer = null;
@@ -214,6 +217,13 @@ var ZotTurboPrefs = (function () {
     if (elWebp) {
       const sy = s.system;
       elWebp.textContent = `${sy.webpCompressedCount} 张 (省 ${sy.webpSavedMB.toFixed(2)} MB / ${sy.webpSavedRatio.toFixed(0)}%)`;
+    }
+
+    const elUi = $("zt-stat-ui");
+    if (elUi && s.ui) {
+      const u = s.ui;
+      const modeStr = u.coalesceEnabled ? `防抖 ${u.debounceMs}ms` : "已关闭";
+      elUi.textContent = `已拦截冗余重绘 ${u.coalescedSelections || 0} 次 (即时 ${u.immediateSelections || 0} 次 · ${modeStr}) · 列表预渲 ${u.activeOverscan || u.overscan} 行`;
     }
   }
 
@@ -445,6 +455,9 @@ var ZotTurboPrefs = (function () {
         const val = parseInt(el.value, 10);
         if (Number.isFinite(val)) {
           p.setPref(k, val);
+          if (k === "itemTreeOverscan" || k === "itemSelectDebounceMs") {
+            p.uiAccel?.applySettings?.();
+          }
           setToast(`已保存数值: ${k} = ${val}`);
         }
       });
@@ -631,11 +644,12 @@ var ZotTurboPrefs = (function () {
         setToast("正在应用全部参数...");
         await p.systemAccel.applySQLitePragmas();
         p.tabHibernator.sweepAllWindows({ reason: "apply-btn" });
+        p.uiAccel?.applySettings?.();
         if (p.renderEngine) {
           await p.restartRenderEngine();
         }
         refreshStats();
-        setToast("已应用全部渲染、SQLite 与标签休眠设置");
+        setToast("已应用全部渲染、UI、SQLite 与标签休眠设置");
       } catch (err) {
         setToast("应用参数出错: " + (err?.message || String(err)));
       }
@@ -649,6 +663,7 @@ var ZotTurboPrefs = (function () {
         loadFormValues();
         await p.systemAccel.applySQLitePragmas();
         await p.citeAccel.applyCiteprocRsPref();
+        p.uiAccel?.applySettings?.();
         if (p.renderEngine) {
           await p.restartRenderEngine();
         }

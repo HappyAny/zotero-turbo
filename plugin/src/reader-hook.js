@@ -486,6 +486,43 @@ var ZotMuPDFReaderHook = (function () {
       };
     }
 
+    async _encodeThumbJpegAsync(rgbaBuf, width, height) {
+      const chromeWin =
+        Services.wm.getMostRecentWindow("navigator:browser") || Services.wm.getMostRecentWindow(null);
+      if (!chromeWin || typeof chromeWin.ImageData !== "function") {
+        return null;
+      }
+      const byteLen = width * height * 4;
+      const imgData = new chromeWin.ImageData(new Uint8ClampedArray(rgbaBuf, 0, byteLen), width, height);
+
+      // Prefer OffscreenCanvas.convertToBlob() so JPEG encoding runs off the main UI thread!
+      if (typeof chromeWin.OffscreenCanvas === "function" && typeof chromeWin.FileReader === "function") {
+        try {
+          const oc = new chromeWin.OffscreenCanvas(width, height);
+          const ctx = oc.getContext("2d", { alpha: false });
+          if (ctx && typeof oc.convertToBlob === "function") {
+            ctx.putImageData(imgData, 0, 0);
+            const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+            if (blob && blob.size > 0) {
+              const dataUrl = await new Promise((resolve, reject) => {
+                const fr = new chromeWin.FileReader();
+                fr.onload = () => resolve(typeof fr.result === "string" ? fr.result : null);
+                fr.onerror = () => reject(fr.error || new Error("FileReader error"));
+                fr.readAsDataURL(blob);
+              });
+              if (dataUrl) return dataUrl;
+            }
+          }
+        } catch {}
+      }
+
+      // Synchronous fallback when OffscreenCanvas/convertToBlob is unavailable
+      const scratch = this._getThumbScratchContext(width, height);
+      if (!scratch || !scratch.ctx) return null;
+      scratch.ctx.putImageData(imgData, 0, 0);
+      return scratch.canvas.toDataURL("image/jpeg", 0.85);
+    }
+
     async _renderThumbnailFast(state, rawPv, rawThumbs, origRender, pageIndex) {
       const cfg = this.engine.getConfig();
       if (this._destroyed || !this.engine.isEnabled() || !cfg.renderThumbnails) {
@@ -564,20 +601,11 @@ var ZotMuPDFReaderHook = (function () {
           return;
         }
 
-        const scratch = this._getThumbScratchContext(res.width, res.height);
-        if (!scratch || !scratch.ctx) {
+        const dataUrl = await this._encodeThumbJpegAsync(res.buf, res.width, res.height);
+        if (this._destroyed || iframeWin.closed) return;
+        if (!dataUrl) {
           return origRender.call(rawThumbs, pageIndex);
         }
-
-        const byteLen = res.width * res.height * 4;
-        const imgData = new scratch.chromeWin.ImageData(
-          new Uint8ClampedArray(res.buf, 0, byteLen),
-          res.width,
-          res.height
-        );
-        scratch.ctx.putImageData(imgData, 0, 0);
-        // JPEG @ 0.85 encodes ~15x faster than PNG (~1ms vs 15-25ms) and is 5x smaller in React DOM memory!
-        const dataUrl = scratch.canvas.toDataURL("image/jpeg", 0.85);
 
         const cssW = 120;
         const cssH = Math.max(20, Math.round((cssW * res.height) / Math.max(1, res.width)));
@@ -785,7 +813,26 @@ var ZotMuPDFReaderHook = (function () {
                       res.height
                     );
                     if (shouldSlice) {
-                      const STRIPS = 4;
+                      // Use 6 strips for giant 2.8K/4K canvases (>4.5MP) so each strip stays <5ms inside 120Hz frames
+                      const STRIPS = res.width * res.height >= 4500000 ? 6 : 4;
+                      const yieldNextFrame = () =>
+                        new Promise(resolve => {
+                          let done = false;
+                          const finish = () => {
+                            if (done) return;
+                            done = true;
+                            resolve();
+                          };
+                          const tId = setTimeout(finish, 16);
+                          try {
+                            if (typeof xrayWin.requestAnimationFrame === "function") {
+                              xrayWin.requestAnimationFrame(() => {
+                                clearTimeout(tId);
+                                finish();
+                              });
+                            }
+                          } catch {}
+                        });
                       let abortedMidSlice = false;
                       for (let s = 0; s < STRIPS; s++) {
                         if (checkCancelled() || xrayCanvas.width !== res.width || xrayCanvas.height !== res.height) {
@@ -802,7 +849,7 @@ var ZotMuPDFReaderHook = (function () {
                         }
                         if (s + 1 < STRIPS) {
                           const ty0 = nowMs();
-                          await new Promise(r => setTimeout(r, 4));
+                          await yieldNextFrame();
                           yieldMs += nowMs() - ty0;
                         }
                       }
@@ -1436,29 +1483,47 @@ var ZotMuPDFReaderHook = (function () {
           ? `\n侧栏缩略图加速: 已渲染 ${summary.thumbCount} 张（最近 ${fmtMs(summary.thumbLastMs)}ms · ${summary.fgWorkers || 2}线程直出）`
           : "";
 
+      const applyDom = (nameText, dotColor, metricText, titleText) => {
+        if (rec._lastName !== nameText) {
+          rec._lastName = nameText;
+          rec.nameEl.textContent = nameText;
+        }
+        if (rec._lastDot !== dotColor) {
+          rec._lastDot = dotColor;
+          rec.dot.style.backgroundColor = dotColor;
+        }
+        if (rec._lastMetric !== metricText) {
+          rec._lastMetric = metricText;
+          rec.metricEl.textContent = metricText;
+        }
+        if (rec._lastTitle !== titleText) {
+          rec._lastTitle = titleText;
+          rec.btn.title = titleText;
+        }
+      };
+
       if (summary.enabled) {
-        rec.nameEl.textContent = "MuPDF";
         if (summary.lastError && !summary.ready) {
-          rec.dot.style.backgroundColor = "#dc2626";
-          rec.metricEl.textContent = "ERR";
-          rec.btn.title = `Zotero MuPDF Engine 启动失败（已自动回退 PDF.js）\n错误: ${summary.lastError}`;
+          applyDom(
+            "MuPDF",
+            "#dc2626",
+            "ERR",
+            `Zotero MuPDF Engine 启动失败（已自动回退 PDF.js）\n错误: ${summary.lastError}`
+          );
           return;
         }
+        let dotColor = summary.ready ? "#16a34a" : "#eab308";
+        let metricText = summary.ready ? "就绪" : "…";
         if (rec._flashText && rec._flashUntil > Date.now()) {
-          rec.dot.style.backgroundColor = "#16a34a";
-          rec.metricEl.textContent = rec._flashText;
+          dotColor = "#16a34a";
+          metricText = rec._flashText;
         } else if (summary.busy) {
-          rec.dot.style.backgroundColor = "#f59e0b";
-          rec.metricEl.textContent = "⏳";
-        } else {
-          rec.dot.style.backgroundColor = summary.ready ? "#16a34a" : "#eab308";
-          if (summary.totalRenders > 0) {
-            const shownMs = summary.lastE2EMs > 0 ? summary.lastE2EMs : summary.lastRenderMs;
-            const tag = summary.lastCacheTier === "pix" ? "⚡" : "";
-            rec.metricEl.textContent = `${tag}${fmtCompact(shownMs)}`;
-          } else {
-            rec.metricEl.textContent = summary.ready ? "就绪" : "…";
-          }
+          dotColor = "#f59e0b";
+          metricText = "⏳";
+        } else if (summary.totalRenders > 0) {
+          const shownMs = summary.lastE2EMs > 0 ? summary.lastE2EMs : summary.lastRenderMs;
+          const tag = summary.lastCacheTier === "pix" ? "⚡" : "";
+          metricText = `${tag}${fmtCompact(shownMs)}`;
         }
         const pixPct = summary.totalRenders > 0 ? Math.round((summary.pixHits / summary.totalRenders) * 100) : 0;
         const verStr = summary.mupdfVersion ? `MuPDF ${summary.mupdfVersion} 进程内无锁 DLL` : "MuPDF 进程内";
@@ -1479,7 +1544,7 @@ var ZotMuPDFReaderHook = (function () {
           summary.lastWidth > 0 && summary.lastHeight > 0 ? ` ${summary.lastWidth}×${summary.lastHeight}` : "";
         const modeSuffix = modeLabel ? ` · ${modeLabel}${sizeLabel}` : "";
         const ipcTotalMs = (summary.lastQueueMs || 0) + (summary.lastIpcMs || 0);
-        rec.btn.title =
+        const titleText =
           `Zotero MuPDF Engine (${verStr}${workerStr})\n` +
           `状态: 已启用（单击切换 PDF.js；右键快捷内存菜单；Shift+单击清缓存冷启动对比）\n` +
           `最近端到端: ${fmtMs(summary.lastE2EMs)}ms（引擎 ${fmtMs(summary.lastRenderMs)}ms · 通信 ${fmtMs(ipcTotalMs)}ms · 绘制 ${fmtMs(summary.lastPaintMs)}ms${modeSuffix}）\n` +
@@ -1488,18 +1553,19 @@ var ZotMuPDFReaderHook = (function () {
           textLayerLine +
           compareLine +
           (summary.lastFallbackReason ? `\n最近回退原因: ${summary.lastFallbackReason}` : "");
+        applyDom("MuPDF", dotColor, metricText, titleText);
       } else {
-        rec.dot.style.backgroundColor = "#9ca3af";
-        rec.nameEl.textContent = "PDF.js";
-        if (rec._flashText && rec._flashUntil > Date.now()) {
-          rec.metricEl.textContent = rec._flashText;
-        } else {
-          rec.metricEl.textContent = summary.pdfjsRenders > 0 ? fmtCompact(summary.pdfjsLastMs) : "原生";
-        }
-        rec.btn.title =
+        const metricText =
+          rec._flashText && rec._flashUntil > Date.now()
+            ? rec._flashText
+            : summary.pdfjsRenders > 0
+              ? fmtCompact(summary.pdfjsLastMs)
+              : "原生";
+        const titleText =
           `Zotero MuPDF Engine\n` +
           `状态: 已暂停（当前使用原生 PDF.js，单击切回 MuPDF；右键快捷内存菜单；Shift+单击冷启动对比）` +
           compareLine;
+        applyDom("PDF.js", "#9ca3af", metricText, titleText);
       }
     }
 
