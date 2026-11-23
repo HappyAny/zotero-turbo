@@ -1,0 +1,175 @@
+name: Build Universal Zotero Turbo XPI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MUPDF_VERSION: "1.28.0"
+
+jobs:
+  build-win-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build Windows x64 unified native DLL & run C tests
+        shell: pwsh
+        run: |
+          $env:GCC_DIR = "C:\msys64\mingw64\bin"
+          if (-not (Test-Path "$env:GCC_DIR\gcc.exe")) {
+            $env:GCC_DIR = ""
+          }
+          if (!(Test-Path "third_party/mupdf/libs/libmupdf_windows_amd64.a")) {
+            Write-Host "Fetching MuPDF ${{ env.MUPDF_VERSION }} prebuilt headers/libs..."
+            git clone --depth 1 https://github.com/HappyAny/zotero-mupdf-engine.git _mupdf_src
+            New-Item -ItemType Directory -Force -Path third_party/mupdf | Out-Null
+            Copy-Item -Recurse _mupdf_src/engine/third_party/mupdf/* third_party/mupdf/
+          }
+          node scripts/build.mjs --native-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-win-x64
+          path: plugin/bin/zotero-turbo-native-win-x64.dll
+
+  build-macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Cache MuPDF static libs (darwin-arm64)
+        id: mupdf-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mupdf-out
+          key: mupdf-${{ env.MUPDF_VERSION }}-darwin-arm64-v1
+      - name: Build MuPDF static libs (darwin/arm64)
+        if: steps.mupdf-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz" -o /tmp/mupdf.tar.gz
+          tar -xzf /tmp/mupdf.tar.gz -C /tmp
+          cd "/tmp/mupdf-${MUPDF_VERSION}-source"
+          make -j"$(sysctl -n hw.ncpu)" build=release HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_TESSERACT=no HAVE_LEPTONICA=no HAVE_OBJCOPY=no USE_SYSTEM_LIBS=no XCFLAGS="-fPIC -arch arm64 -mmacosx-version-min=11.0" XLDFLAGS="-arch arm64" libs
+          mkdir -p /tmp/mupdf-out/lib
+          cp -R include /tmp/mupdf-out/include
+          cp build/release/libmupdf.a build/release/libmupdf-third.a /tmp/mupdf-out/lib/
+      - name: Build macOS arm64 unified dylib & run C tests
+        env:
+          TARGET_ARCH: arm64
+          MUPDF_INC_DIR: /tmp/mupdf-out/include
+          MUPDF_LIB_DIR: /tmp/mupdf-out/lib
+        run: node scripts/build.mjs --native-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-darwin-arm64
+          path: plugin/bin/zotero-turbo-native-darwin-arm64.dylib
+
+  build-macos-x64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Cache MuPDF static libs (darwin-x64)
+        id: mupdf-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mupdf-out
+          key: mupdf-${{ env.MUPDF_VERSION }}-darwin-x64-v1
+      - name: Build MuPDF static libs (darwin/x64)
+        if: steps.mupdf-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz" -o /tmp/mupdf.tar.gz
+          tar -xzf /tmp/mupdf.tar.gz -C /tmp
+          cd "/tmp/mupdf-${MUPDF_VERSION}-source"
+          make -j"$(sysctl -n hw.ncpu)" build=release HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_TESSERACT=no HAVE_LEPTONICA=no HAVE_OBJCOPY=no USE_SYSTEM_LIBS=no XCFLAGS="-fPIC -arch x86_64 -mmacosx-version-min=11.0" XLDFLAGS="-arch x86_64" libs
+          mkdir -p /tmp/mupdf-out/lib
+          cp -R include /tmp/mupdf-out/include
+          cp build/release/libmupdf.a build/release/libmupdf-third.a /tmp/mupdf-out/lib/
+      - name: Build macOS x64 unified dylib & run C tests
+        env:
+          TARGET_ARCH: x64
+          MUPDF_INC_DIR: /tmp/mupdf-out/include
+          MUPDF_LIB_DIR: /tmp/mupdf-out/lib
+        run: node scripts/build.mjs --native-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-darwin-x64
+          path: plugin/bin/zotero-turbo-native-darwin-x64.dylib
+
+  build-linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Cache MuPDF static libs (linux-x64)
+        id: mupdf-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mupdf-out
+          key: mupdf-${{ env.MUPDF_VERSION }}-linux-x64-v1
+      - name: Build MuPDF static libs (linux/x64)
+        if: steps.mupdf-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz" -o /tmp/mupdf.tar.gz
+          tar -xzf /tmp/mupdf.tar.gz -C /tmp
+          cd "/tmp/mupdf-${MUPDF_VERSION}-source"
+          make -j"$(nproc)" build=release HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_TESSERACT=no HAVE_LEPTONICA=no HAVE_OBJCOPY=no USE_SYSTEM_LIBS=no XCFLAGS="-fPIC -fvisibility=hidden" libs
+          mkdir -p /tmp/mupdf-out/lib
+          cp -R include /tmp/mupdf-out/include
+          cp build/release/libmupdf.a build/release/libmupdf-third.a /tmp/mupdf-out/lib/
+      - name: Build Linux x64 unified .so & run C tests
+        env:
+          MUPDF_INC_DIR: /tmp/mupdf-out/include
+          MUPDF_LIB_DIR: /tmp/mupdf-out/lib
+        run: node scripts/build.mjs --native-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64
+          path: plugin/bin/zotero-turbo-native-linux-x64.so
+
+  package-universal-xpi:
+    needs: [build-win-x64, build-macos-arm64, build-macos-x64, build-linux-x64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          path: plugin/bin
+          merge-multiple: true
+      - name: Assemble universal XPI & verify
+        run: |
+          ls -lh plugin/bin/
+          node scripts/verify-plugin.mjs
+          node scripts/build.mjs --pack-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zotero-turbo-universal-xpi
+          path: dist/zotero-turbo-*.xpi
+      - name: Publish universal XPI to GitHub Release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          XPI="$(ls dist/zotero-turbo-*.xpi | head -n 1)"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$XPI" --clobber
+          else
+            gh release create "$TAG" "$XPI" --title "$TAG" --generate-notes
+          fi

@@ -1,0 +1,11 @@
+dist/
+native/*.exe
+native/test_dll
+native/test_turbo
+plugin/bin/*.dll
+plugin/bin/*.dylib
+plugin/bin/*.so
+_mupdf_src/
+third_party/
+node_modules/
+*.log

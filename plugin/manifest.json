@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Turbo",
+  "version": "0.7.2",
+  "description": "All-in-one native performance suite for Zotero: MuPDF 1.28.0 in-process PDF & thumbnail renderer (with dark/sepia LUT & HiDPI DPR cap), MuPDF full-text extraction & reader text layer, smart background tab hibernation, multi-threaded native file scanner & search cache, citation/CSL acceleration, SQLite tuning, and auto-WebP note image compression.",
+  "author": "HappyAny",
+  "homepage_url": "https://github.com/HappyAny/zotero-turbo",
+  "icons": {
+    "48": "content/icons/icon.svg",
+    "96": "content/icons/icon.svg"
+  },
+  "applications": {
+    "zotero": {
+      "id": "zotero-turbo@happyany.github.io",
+      "update_url": "https://raw.githubusercontent.com/HappyAny/zotero-turbo/main/updates.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

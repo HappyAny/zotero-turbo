@@ -1,0 +1,317 @@
+<vbox id="zot-turbo-prefpane"
+      class="main-section"
+      xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      onload="window.ZotTurboPrefs &amp;&amp; window.ZotTurboPrefs.init()">
+
+  <html:div class="zt-root">
+    <html:div class="zt-header">
+      <html:div class="zt-title-row">
+        <html:h2 class="zt-title">⚡ Zotero Turbo 一体化性能加速套件</html:h2>
+        <html:span id="zt-badge-status" class="zt-badge zt-badge-ok">检测中...</html:span>
+      </html:div>
+      <html:p class="zt-subtitle">
+        单原生 MuPDF 1.28.0 DLL 统一驱动 6 大性能引擎：PDF 与缩略图原生渲染、PDF 全文索引与文本层、智能后台标签休眠、多线程全文扫描与搜索缓存、引文 CSL 加速、SQLite 调优与笔记图片 WebP 压缩。
+      </html:p>
+      <html:div id="zt-conflict-banner" class="zt-alert" style="display:none;">
+        检测到旧版独立 <html:strong>Zotero MuPDF Engine</html:strong> 插件仍在运行。为避免重复挂钩，Zotero Turbo 已自动让出渲染接管权；建议在「工具 → 插件」中卸载旧版独立插件并重启 Zotero，即可享受单 DLL 合一的更低内存占用。
+      </html:div>
+    </html:div>
+
+    <!-- Live Telemetry Summary -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-header">
+        <html:span class="zt-card-title">📊 实时运行遥测 &amp; 进程内存监控</html:span>
+        <html:div class="zt-actions-inline">
+          <html:button id="zt-btn-refresh" type="button" class="zt-btn">刷新</html:button>
+          <html:button id="zt-btn-deep-reclaim" type="button" class="zt-btn zt-btn-primary">深度释放内存</html:button>
+          <html:button id="zt-btn-trim-render" type="button" class="zt-btn">释放渲染缓存</html:button>
+          <html:button id="zt-btn-restart-render" type="button" class="zt-btn">热重载渲染引擎</html:button>
+          <html:button id="zt-btn-hibernate-now" type="button" class="zt-btn">休眠后台标签</html:button>
+          <html:button id="zt-btn-optimize-db" type="button" class="zt-btn">优化 SQLite &amp; FTS5</html:button>
+        </html:div>
+      </html:div>
+      <html:div class="zt-metrics-grid">
+        <html:div class="zt-metric zt-metric-wide">
+          <html:div class="zt-metric-label">⚡ MuPDF 1.28.0 原生渲染引擎</html:div>
+          <html:div id="zt-stat-render" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric zt-metric-wide">
+          <html:div class="zt-metric-label">🧠 主进程实时内存 &amp; PDF.js Worker 清理</html:div>
+          <html:div id="zt-stat-memory" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">📄 PDF 全文 / 识别 / 文本层 / 目录</html:div>
+          <html:div id="zt-stat-pdf" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">💤 标签状态 (活跃 / 休眠)</html:div>
+          <html:div id="zt-stat-tabs" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">🔍 全文扫描 / 搜索缓存</html:div>
+          <html:div id="zt-stat-search" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">📚 引文 CSL 缓存 / 引擎</html:div>
+          <html:div id="zt-stat-cite" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">🗄️ SQLite 性能 &amp; 数据库体检</html:div>
+          <html:div id="zt-stat-sqlite" class="zt-metric-val">-</html:div>
+        </html:div>
+        <html:div class="zt-metric">
+          <html:div class="zt-metric-label">🖼️ 笔记图片 WebP 瘦身</html:div>
+          <html:div id="zt-stat-webp" class="zt-metric-val">-</html:div>
+        </html:div>
+      </html:div>
+    </html:div>
+
+    <!-- Built-in Live Benchmark -->
+    <html:div class="zt-card zt-card-accent">
+      <html:div class="zt-card-header">
+        <html:span class="zt-card-title">🚀 实测性能对比基准 (使用当前文献库真实 PDF 与条目)</html:span>
+        <html:button id="zt-btn-benchmark" type="button" class="zt-btn zt-btn-primary">开始 6 项实测 Benchmark</html:button>
+      </html:div>
+      <html:div id="zt-bench-status" class="zt-hint">点击上方按钮，自动实测 MuPDF 2K 渲染、PDF 全文提取、单页文本层、拖入元数据识别、多线程全文扫描与引文 CSL 构建。</html:div>
+      <html:div id="zt-bench-results" class="zt-bench-table-wrap"></html:div>
+    </html:div>
+
+    <!-- Module 1: Unified MuPDF Render Engine -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">1. MuPDF 1.28.0 原生 PDF 渲染引擎 (含暗色/护眼 LUT 提速 &amp; 缩略图)</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-enabled" type="checkbox"/>
+        <html:span>启用 MuPDF 原生页面渲染引擎 (关闭后即时回退 PDF.js)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-renderThumbnails" type="checkbox"/>
+        <html:span>启用侧栏缩略图多线程原生渲染 (含批注缩略图自动保留原生覆盖层)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-softwareCanvas" type="checkbox"/>
+        <html:span>使用 Skia 软件画布 + 离屏分帧绘制 (推荐，避免主线程 GPU 阻塞与撕裂)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-prerender" type="checkbox"/>
+        <html:span>开启方向感知后台预渲染 (最低优先级预渲 +1/+2/-1 页，前台活跃自动让步)</html:span>
+      </html:label>
+
+      <html:div class="zt-row-grid">
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">抗锯齿等级 (AA Level)</html:span>
+          <menulist id="zt-mupdf-aaLevel" native="true" class="zt-menulist">
+            <menupopup>
+              <menuitem value="8" label="8 — 最高清晰度 (推荐)"/>
+              <menuitem value="6" label="6 — 高清晰度"/>
+              <menuitem value="4" label="4 — 标准"/>
+              <menuitem value="2" label="2 — 轻量"/>
+              <menuitem value="0" label="0 — 关闭"/>
+            </menupopup>
+          </menulist>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">高分屏画布 DPR 上限</html:span>
+          <menulist id="zt-mupdf-maxOutputScale" native="true" class="zt-menulist">
+            <menupopup>
+              <menuitem value="native" label="原生满分辨率 (最清晰)"/>
+              <menuitem value="1.5" label="1.5× (2K/4K 屏省 40% 显存)"/>
+              <menuitem value="1.25" label="1.25× (轻量极速)"/>
+              <menuitem value="1.0" label="1.0× (最低显存)"/>
+            </menupopup>
+          </menulist>
+        </html:div>
+      </html:div>
+
+      <html:div class="zt-row-grid zt-row-grid-4">
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">前台渲染线程</html:span>
+          <html:input id="zt-mupdf-workers" type="number" min="1" max="6" step="1"/>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">后台预渲线程</html:span>
+          <html:input id="zt-mupdf-bgWorkers" type="number" min="0" max="2" step="1"/>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">Store 预算 (MB)</html:span>
+          <html:input id="zt-mupdf-storeMB" type="number" min="32" max="512" step="16"/>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">像素缓存 (MB)</html:span>
+          <html:input id="zt-mupdf-pixCacheMB" type="number" min="32" max="512" step="16"/>
+        </html:div>
+      </html:div>
+      <html:div class="zt-hint" style="padding-left:22px;">提示：修改线程数或内存预算后，点击顶部「热重载渲染引擎」即可立即生效，无需重启 Zotero。</html:div>
+    </html:div>
+
+    <!-- Module 2: PDF Text, Outline, Recognizer, Ctrl+F, Batch Index & Worker Cleanup -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">2. PDF 文本索引、拖入识别、Ctrl+F 搜索、大纲 &amp; Worker 清理 (共用同一 MuPDF DLL)</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-pdfFulltextEnabled" type="checkbox"/>
+        <html:span>使用原生 MuPDF 替代 PDF.js 执行全文索引提取 (实测提速 ~10×，批量导入与重建索引极速完成)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-batchIndexParallelEnabled" type="checkbox"/>
+        <html:span>批量建索引并发预取流水线 (indexItems 并发 3 路 MuPDF 提前提取，批量导入/重建整库索引再快 2–3×)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-pdfRecognizerEnabled" type="checkbox"/>
+        <html:span>使用原生 MuPDF 加速拖入 PDF 元数据识别提取 (getRecognizerData 提速 10–30×，批量拖入 PDF 秒识别 DOI/标题)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-readerTextLayerEnabled" type="checkbox"/>
+        <html:span>使用原生 MuPDF 加速阅读器单页文本层提取 (getPageData 降至 1–5 ms；旋转页/扫描页自动无缝回退)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-ctrlfAccelEnabled" type="checkbox"/>
+        <html:span>阅读器 Ctrl+F 全书搜索并行预取加速 (自动识别顺序扫页，3 线程提前预取 +6 页且不唤醒 PDF.js Worker 爆内存)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-readerOutlineEnabled" type="checkbox"/>
+        <html:span>使用原生 MuPDF 秒开侧栏文档大纲 (getOutline2 &lt; 0.5 ms；无内嵌书签时自动回退 Zotero 智能标题识别)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-pdfjsCleanupEnabled" type="checkbox"/>
+        <html:span>自动清理冗余的 PDF.js Worker 僵尸堆内存 (首屏与引用弹窗扫描完成后自动调用 cleanup()，不影响渲染与引用弹窗)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid">
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">引用弹窗后台扫描延迟 (ms，防开篇抢占 CPU)</html:span>
+          <html:input id="zt-pref-processedDataDelayMs" type="number" min="0" max="10000" step="250"/>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">引用弹窗扫描页数上限 (默认 100 = Zotero 原版)</html:span>
+          <html:input id="zt-pref-processedDataMaxPages" type="number" min="0" max="300" step="10"/>
+        </html:div>
+      </html:div>
+    </html:div>
+
+    <!-- Module 3: Tab Hibernation -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">3. 智能后台标签页休眠器 (多 PDF 内存治理 + 自动释放 MuPDF 缓存)</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-tabHibernateEnabled" type="checkbox"/>
+        <html:span>启用智能自动休眠 (替代 Zotero 默认 24 小时 / 5 标签上限，休眠时自动联动释放 MuPDF 缓存与 Gecko 内存)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid">
+        <html:label class="zt-field">
+          <html:span>最多同时驻留阅读标签数</html:span>
+          <html:input id="zt-pref-tabHibernateMaxLoaded" type="number" min="1" max="15" step="1"/>
+        </html:label>
+        <html:label class="zt-field">
+          <html:span>后台空闲休眠阈值 (分钟)</html:span>
+          <html:input id="zt-pref-tabHibernateIdleMin" type="number" min="1" max="720" step="1"/>
+        </html:label>
+      </html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-tabHibernateNotes" type="checkbox"/>
+        <html:span>同时允许自动休眠后台独立笔记标签页 (默认关闭以保留笔记光标位置)</html:span>
+      </html:label>
+      <html:hr class="zt-sep"/>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-autoBackgroundSlimEnabled" type="checkbox"/>
+        <html:span>窗口最小化或切到后台静置时自动轻度瘦身 (裁剪离屏画布 + 归还 SQLite/MuPDF 堆，不关标签不丢进度)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid">
+        <html:label class="zt-field">
+          <html:span>后台静置触发瘦身阈值 (分钟)</html:span>
+          <html:input id="zt-pref-autoBackgroundSlimMin" type="number" min="1" max="240" step="1"/>
+        </html:label>
+      </html:div>
+    </html:div>
+
+    <!-- Module 4: Search -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">4. 原生多线程全文扫描 &amp; 快速搜索缓存</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-searchNativeScanEnabled" type="checkbox"/>
+        <html:span>使用多线程 C 引擎加速短语/CJK/回退全文文件扫描 (findTextInItems 提速 10–30×)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-searchCacheEnabled" type="checkbox"/>
+        <html:span>启用智能搜索结果内存缓存 (LRU 64 项，库内任何增删改自动实时失效，重复查询 &lt; 1 ms)</html:span>
+      </html:label>
+    </html:div>
+
+    <!-- Module 5: Cite -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">5. 引文格式化 &amp; Word 长文档刷新加速</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-citeCacheEnabled" type="checkbox"/>
+        <html:span>启用 CSL-JSON 与期刊缩写内存缓存 (避免数百条引文刷新时重复解析条目元数据，条目修改自动失效)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-citeUseCiteprocRs" type="checkbox"/>
+        <html:span>启用 Zotero 内置实验性 Rust citeproc-rs (WASM) 引擎 (遇到不兼容自定义样式时自动安全回退到 citeproc-js)</html:span>
+      </html:label>
+    </html:div>
+
+    <!-- Module 6: System -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-title">6. SQLite 引擎调优 &amp; 笔记图片自动 WebP 压缩</html:div>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-sqliteTuneEnabled" type="checkbox"/>
+        <html:span>优化 SQLite 内存映射与页缓存 (Zotero 默认仅 8 MB 缓存且未启用 mmap)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid">
+        <html:label class="zt-field">
+          <html:span>SQLite 页缓存 (MB)</html:span>
+          <html:input id="zt-pref-sqliteCacheMB" type="number" min="8" max="256" step="8"/>
+        </html:label>
+        <html:label class="zt-field">
+          <html:span>SQLite MMap 映射上限 (MB)</html:span>
+          <html:input id="zt-pref-sqliteMmapMB" type="number" min="0" max="1024" step="32"/>
+        </html:label>
+      </html:div>
+
+      <html:hr class="zt-sep"/>
+
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-noteWebpEnabled" type="checkbox"/>
+        <html:span>粘贴/导入笔记 PNG/BMP 截图时自动压缩为 WebP (仅当体积明显更小时替换，可瘦身 70–90%)</html:span>
+      </html:label>
+      <html:div class="zt-row-grid zt-row-grid-3">
+        <html:label class="zt-field">
+          <html:span>WebP 质量 (40–98)</html:span>
+          <html:input id="zt-pref-noteWebpQuality" type="number" min="40" max="98" step="1"/>
+        </html:label>
+        <html:label class="zt-field">
+          <html:span>触发压缩最小体积 (KB)</html:span>
+          <html:input id="zt-pref-noteWebpMinKB" type="number" min="8" max="4096" step="8"/>
+        </html:label>
+        <html:label class="zt-field">
+          <html:span>最长边上限 (px, 0=不缩放)</html:span>
+          <html:input id="zt-pref-noteWebpMaxDim" type="number" min="0" max="8192" step="128"/>
+        </html:label>
+      </html:div>
+      <html:div class="zt-actions-inline" style="padding-left:22px; margin-top:4px; align-items:center;">
+        <html:button id="zt-btn-scan-note-png" type="button" class="zt-btn">扫描历史笔记 PNG</html:button>
+        <html:button id="zt-btn-compress-note-png" type="button" class="zt-btn" disabled="disabled">确认批量转 WebP</html:button>
+        <html:span id="zt-note-webp-status" class="zt-hint">先只读扫描历史笔记 PNG/BMP 截图，确认后再按 Zotero 事务批量转 WebP（兼容同步）。</html:span>
+      </html:div>
+    </html:div>
+
+    <!-- Health Diagnostics (Read-Only) -->
+    <html:div class="zt-card">
+      <html:div class="zt-card-header">
+        <html:span class="zt-card-title">🩺 数据目录 &amp; 第三方插件健康体检 (只读扫描，绝不删文件)</html:span>
+        <html:div class="zt-actions-inline">
+          <html:button id="zt-btn-health-audit" type="button" class="zt-btn">开始体检</html:button>
+          <html:button id="zt-btn-vacuum-db" type="button" class="zt-btn">紧缩数据库 (VACUUM)</html:button>
+          <html:button id="zt-btn-reveal-datadir" type="button" class="zt-btn">打开数据目录</html:button>
+        </html:div>
+      </html:div>
+      <html:div id="zt-audit-status" class="zt-hint">一键排查数据目录中的超大孤儿数据库、WAL 膨胀与已安装插件体积排行。</html:div>
+      <html:div id="zt-audit-results" class="zt-bench-table-wrap"></html:div>
+    </html:div>
+
+    <html:div class="zt-footer">
+      <html:span id="zt-save-toast" class="zt-hint">所有开关即时生效；SQLite / 渲染线程参数调整后可点右侧按钮一键应用。</html:span>
+      <html:div class="zt-actions-inline">
+        <html:button id="zt-btn-apply-all" type="button" class="zt-btn">应用全部参数</html:button>
+        <html:button id="zt-btn-reset" type="button" class="zt-btn">恢复默认设置</html:button>
+      </html:div>
+    </html:div>
+  </html:div>
+</vbox>

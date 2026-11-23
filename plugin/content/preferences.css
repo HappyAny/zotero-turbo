@@ -1,0 +1,268 @@
+#zot-turbo-prefpane {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.zt-root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 6px 4px 24px 2px;
+  font-size: 13px;
+  line-height: 1.45;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.zt-header {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.zt-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.zt-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.zt-subtitle {
+  margin: 0;
+  opacity: 0.78;
+  font-size: 12px;
+}
+
+.zt-alert {
+  padding: 8px 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.1);
+  font-size: 12px;
+}
+
+.zt-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.zt-badge-ok {
+  background: rgba(16, 185, 129, 0.16);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.zt-badge-warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.zt-card {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background: rgba(128, 128, 128, 0.04);
+}
+
+.zt-card-accent {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.zt-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.zt-card-title {
+  font-weight: 650;
+  font-size: 13.5px;
+}
+
+.zt-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 8px;
+}
+
+.zt-metric {
+  border: 1px solid rgba(128, 128, 128, 0.18);
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: rgba(128, 128, 128, 0.04);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zt-metric-wide {
+  grid-column: 1 / -1;
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.05);
+}
+
+.zt-metric-label {
+  font-size: 11px;
+  opacity: 0.72;
+  margin-bottom: 2px;
+}
+
+.zt-metric-val {
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.zt-row-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.zt-row-check input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.zt-row-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  padding-left: 22px;
+  box-sizing: border-box;
+}
+
+.zt-row-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.zt-row-grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.zt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.zt-field-label {
+  font-size: 12px;
+}
+
+.zt-menulist {
+  max-width: 260px;
+  min-width: 150px;
+  margin-inline: 0;
+}
+
+.zt-field input[type="number"] {
+  width: 96px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+}
+
+.zt-sep {
+  border: none;
+  border-top: 1px solid rgba(128, 128, 128, 0.2);
+  margin: 4px 0;
+}
+
+.zt-actions-inline {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.zt-btn {
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: rgba(128, 128, 128, 0.08);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.zt-btn:hover {
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.zt-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.zt-btn-primary {
+  background: #d97706;
+  color: #ffffff;
+  border-color: #b45309;
+  font-weight: 600;
+}
+
+.zt-btn-primary:hover {
+  background: #b45309;
+}
+
+.zt-hint {
+  font-size: 12px;
+  opacity: 0.78;
+}
+
+.zt-bench-table-wrap {
+  overflow-x: auto;
+}
+
+.zt-bench-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zt-bench-table th,
+.zt-bench-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.zt-bench-table th {
+  font-weight: 650;
+  opacity: 0.85;
+}
+
+.zt-speedup {
+  font-weight: 700;
+  color: #059669;
+}
+
+.zt-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
