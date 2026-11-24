@@ -47,6 +47,7 @@ var ZotTurboPrefs = (function () {
     "readerOutlineEnabled",
     "pdfjsCleanupEnabled",
     "tabHibernateEnabled",
+    "startupHibernateBackgroundTabs",
     "tabHibernateNotes",
     "autoBackgroundSlimEnabled",
     "searchNativeScanEnabled",
@@ -742,6 +743,7 @@ var ZotTurboPrefs = (function () {
     }
     try {
       refreshStats();
+      plugin()?.systemAccel?.refreshSQLiteInfo?.().then(() => refreshStats()).catch(() => {});
     } catch (e) {
       Zotero.logError(e);
     }
@@ -753,6 +755,7 @@ var ZotTurboPrefs = (function () {
         try {
           loadFormValues();
           refreshStats();
+          plugin()?.systemAccel?.refreshSQLiteInfo?.().then(() => refreshStats()).catch(() => {});
         } catch {}
       });
     }

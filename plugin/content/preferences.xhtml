@@ -198,6 +198,10 @@
         <html:input id="zt-pref-tabHibernateEnabled" type="checkbox"/>
         <html:span>启用智能自动休眠 (替代 Zotero 默认 24 小时 / 5 标签上限，休眠时自动联动释放 MuPDF 缓存与 Gecko 内存)</html:span>
       </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-startupHibernateBackgroundTabs" type="checkbox"/>
+        <html:span>启动时自动休眠所有后台恢复 PDF 标签 (仅保留当前激活标签，点回时由 MuPDF 毫秒级恢复)</html:span>
+      </html:label>
       <html:div class="zt-row-grid">
         <html:label class="zt-field">
           <html:span>最多同时驻留阅读标签数</html:span>

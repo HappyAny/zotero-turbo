@@ -24,14 +24,20 @@ var ZotTurboSystemAccel = (function () {
     }
 
     async init() {
-      await this.applySQLitePragmas();
+      // Skip 10+ diagnostic PRAGMA/stat queries at startup; Preferences fetches them on demand.
+      await this.applySQLitePragmas({ refreshInfo: false });
       this._hookNoteImageImport();
 
-      this._idleOptTimer = setTimeout(() => {
-        if (!this._destroyed && this.getPref("sqliteTuneEnabled", true)) {
-          this.runIdleOptimize({ truncateWal: false }).catch(() => {});
+      const runDeferredOptimize = () => {
+        this._idleOptTimer = null;
+        if (this._destroyed || !this.getPref("sqliteTuneEnabled", true)) return;
+        if (Zotero.Sync?.Runner?.syncInProgress) {
+          this._idleOptTimer = setTimeout(runDeferredOptimize, 60 * 1000);
+          return;
         }
-      }, 45 * 1000);
+        this.runIdleOptimize({ truncateWal: false }).catch(() => {});
+      };
+      this._idleOptTimer = setTimeout(runDeferredOptimize, 180 * 1000);
     }
 
     getMemorySnapshot() {
@@ -51,7 +57,7 @@ var ZotTurboSystemAccel = (function () {
       return snap;
     }
 
-    async applySQLitePragmas() {
+    async applySQLitePragmas({ refreshInfo = true } = {}) {
       if (!Zotero.DB || typeof Zotero.DB.queryAsync !== "function") return;
       const enabled = !!this.getPref("sqliteTuneEnabled", true);
       const cacheMB = Math.max(8, Math.min(256, Number(this.getPref("sqliteCacheMB", 64)) || 64));
@@ -71,12 +77,26 @@ var ZotTurboSystemAccel = (function () {
           } catch {}
 
           this.stats.sqliteTuned = true;
+          this.stats.sqliteInfo = {
+            ...this.stats.sqliteInfo,
+            cacheMB,
+            mmapMB,
+            tempStore: "MEMORY",
+          };
         } else {
           await Zotero.DB.queryAsync("PRAGMA cache_size = -8192");
           await Zotero.DB.queryAsync("PRAGMA mmap_size = 0");
           this.stats.sqliteTuned = false;
+          this.stats.sqliteInfo = {
+            ...this.stats.sqliteInfo,
+            cacheMB: 8,
+            mmapMB: 0,
+            tempStore: "DEFAULT",
+          };
         }
-        await this.refreshSQLiteInfo();
+        if (refreshInfo) {
+          await this.refreshSQLiteInfo();
+        }
       } catch (err) {
         Zotero.debug("[ZotTurbo] SQLite PRAGMA tune error: " + (err?.message || err));
       }

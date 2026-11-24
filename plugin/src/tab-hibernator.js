@@ -9,7 +9,7 @@ var ZotTurboTabHibernator = (function () {
   const STYLE_ID = "zot-turbo-tab-hibernate-style";
 
   class TabHibernator {
-    constructor({ getPref, nativeClient, renderEngine = null, onBackgroundSlim = null, startupSweepDelayMs = 6000 }) {
+    constructor({ getPref, nativeClient, renderEngine = null, onBackgroundSlim = null, startupSweepDelayMs = 4000 }) {
       this.getPref = getPref;
       this.native = nativeClient;
       this.renderEngine = renderEngine;
@@ -48,12 +48,16 @@ var ZotTurboTabHibernator = (function () {
         this._checkBackgroundAutoSlim();
       }, 60 * 1000);
 
-      // Early startup sweep: hibernate excess background restored PDF tabs quickly instead of waiting 60s
+      // Early startup sweep: hibernate restored background PDF tabs quickly instead of waiting 60s
       if (this._startupSweepDelayMs > 0) {
         this._startupSweepTimer = setTimeout(() => {
           this._startupSweepTimer = null;
           if (this._destroyed || !this.getPref("tabHibernateEnabled", true)) return;
-          this.sweepAllWindows({ reason: "startup-restore" });
+          if (this.getPref("startupHibernateBackgroundTabs", true)) {
+            this.hibernateAllBackground({ includeNotes: false, reason: "startup-restore" });
+          } else {
+            this.sweepAllWindows({ reason: "startup-restore" });
+          }
         }, this._startupSweepDelayMs);
         if (typeof this._startupSweepTimer === "object" && typeof this._startupSweepTimer.unref === "function") {
           this._startupSweepTimer.unref();

@@ -21,6 +21,8 @@ var ZotMuPDFReaderHook = (function () {
       this.engine = engineClient;
       this.renderIdleSleepMs = Math.max(0, Number(renderIdleSleepMs) || 0);
       this._renderSleepTimer = null;
+      this._scanTimer = null;
+      this._scanFollowupTimer = null;
       this.pagePatchSource = "";
       this.readerStates = new Map(); // stableReaderKey -> state
       this.viewerEntries = new Set(); // { viewerWin, rawWin, viewerKey, onUnload }
@@ -102,9 +104,7 @@ var ZotMuPDFReaderHook = (function () {
               return;
             }
             if (type === "tab" && (event === "add" || event === "select")) {
-              this._scanAllReaders();
-              setTimeout(() => this._scanAllReaders(), 200);
-              setTimeout(() => this._scanAllReaders(), 800);
+              this._scheduleScanAllReaders();
             }
           },
         },
@@ -125,6 +125,28 @@ var ZotMuPDFReaderHook = (function () {
 
       // Attach to any PDF readers already open when the plugin starts (mid-session install)
       this._scanAllReaders();
+    }
+
+    _scheduleScanAllReaders() {
+      if (this._destroyed) return;
+      if (this._scanTimer) {
+        clearTimeout(this._scanTimer);
+        this._scanTimer = null;
+      }
+      if (this._scanFollowupTimer) {
+        clearTimeout(this._scanFollowupTimer);
+        this._scanFollowupTimer = null;
+      }
+      this._scanTimer = setTimeout(() => {
+        this._scanTimer = null;
+        if (this._destroyed) return;
+        this._scanAllReaders();
+        // Single follow-up scan in case the newly added tab mounts its iframe slightly later
+        this._scanFollowupTimer = setTimeout(() => {
+          this._scanFollowupTimer = null;
+          if (!this._destroyed) this._scanAllReaders();
+        }, 500);
+      }, 100);
     }
 
     _scanAllReaders() {
@@ -1625,6 +1647,14 @@ var ZotMuPDFReaderHook = (function () {
     shutdown() {
       this._destroyed = true;
       this._clearRenderSleepTimer();
+      if (this._scanTimer) {
+        clearTimeout(this._scanTimer);
+        this._scanTimer = null;
+      }
+      if (this._scanFollowupTimer) {
+        clearTimeout(this._scanFollowupTimer);
+        this._scanFollowupTimer = null;
+      }
 
       if (this._unsubStats) {
         this._unsubStats();

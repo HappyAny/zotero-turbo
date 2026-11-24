@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.11.0");
+  assert.equal(manifest.version, "0.12.0");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -61,6 +61,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(xhtml.includes('id="zt-pref-ctrlfAccelEnabled"'), "Expected Ctrl+F checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-batchIndexParallelEnabled"'), "Expected batch index checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-autoBackgroundSlimEnabled"'), "Expected autoBackgroundSlim checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-startupHibernateBackgroundTabs"'), "Expected startupHibernateBackgroundTabs checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-autoBackgroundSlimMin"'), "Expected autoBackgroundSlimMin input in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-itemSelectCoalesceEnabled"'), "Expected itemSelectCoalesceEnabled checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-pref-itemSelectDebounceMs"'), "Expected itemSelectDebounceMs input in preferences.xhtml");
@@ -77,7 +78,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.11.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.12.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2142,14 +2143,14 @@ console.log("=== [Check 18] v0.11.0: Cold-Start Grace Window & Early Startup Tab
   });
   loadScriptInContext("src/tab-hibernator.js", thCtx);
   const hibernator = new thCtx.ZotTurboTabHibernator.TabHibernator({
-    getPref: (k, d) => (k === "tabHibernateMaxLoaded" ? 2 : d),
+    getPref: (k, d) => (k === "tabHibernateMaxLoaded" ? 2 : k === "startupHibernateBackgroundTabs" ? false : d),
     nativeClient: { trim: async () => {}, evictPath: async () => {} },
     startupSweepDelayMs: 35,
   });
   hibernator.init();
   assert.equal(unloadedIds.length, 0);
   await new Promise((r) => setTimeout(r, 80));
-  assert.deepEqual(unloadedIds, ["pdf-oldest"], "Early startup sweep must hibernate excess 3rd restored PDF tab");
+  assert.deepEqual(unloadedIds, ["pdf-oldest"], "Early startup sweep with startupHibernateBackgroundTabs=false must hibernate excess 3rd tab");
   hibernator.shutdown();
   assert.equal(hibernator._startupSweepTimer, null);
 
@@ -2157,10 +2158,140 @@ console.log("=== [Check 18] v0.11.0: Cold-Start Grace Window & Early Startup Tab
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(bootSrc.includes("startupGraceSec: 45"), "bootstrap.js must define startupGraceSec default");
   assert.ok(bootSrc.includes("startupProcessedDataDelayMs: 12000"), "bootstrap.js must define startupProcessedDataDelayMs default");
-  assert.ok(bootSrc.includes("startupSweepDelayMs: 6000"), "bootstrap.js must enable early startup tab sweep");
+  assert.ok(bootSrc.includes("startupSweepDelayMs: 4000"), "bootstrap.js must enable early 4s startup tab sweep");
+  assert.ok(bootSrc.includes("startupHibernateBackgroundTabs: true"), "bootstrap.js must enable startupHibernateBackgroundTabs by default");
   assert.ok(bootSrc.includes("}, 3000);"), "bootstrap.js must stagger non-urgent nativeClient warmup to 3s");
 
   console.log("  PASS: Cold-start 45s grace window, aborted hibernated scan, and early startup tab hibernation verified");
 }
 
-console.log("\n[ALL 18 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 19] v0.12.0: Deferred SQLite Diagnostics, Coalesced Reader Scan & All-Background Startup Hibernation ===");
+{
+  // 1. SystemAccelerator.init() skips diagnostic PRAGMA page_count/freelist queries at startup
+  const queries = [];
+  const valueQueries = [];
+  let idleDelaySeen = 0;
+  const sysCtx = vm.createContext({
+    Zotero: {
+      DB: {
+        async queryAsync(q) { queries.push(q); },
+        async valueQueryAsync(q) { valueQueries.push(q); return 4096; },
+      },
+      Attachments: {},
+      DataDirectory: { dir: "D:\\Mock" },
+      debug() {},
+    },
+    Components: { classes: {}, interfaces: {} },
+    ChromeUtils: {
+      importESModule: () => ({
+        setTimeout: (fn, ms) => { idleDelaySeen = ms; return 99; },
+        clearTimeout() {},
+      }),
+    },
+    IOUtils: { stat: async () => ({ size: 0 }) },
+    PathUtils: { join: (...a) => a.join("\\") },
+  });
+  loadScriptInContext("src/system-accel.js", sysCtx);
+  const sysAccel = new sysCtx.ZotTurboSystemAccel.SystemAccelerator({
+    getPref: (_k, d) => d,
+  });
+  await sysAccel.init();
+  assert.ok(queries.some((q) => q.includes("PRAGMA cache_size")), "Startup must still apply core SQLite tuning PRAGMAs");
+  assert.equal(valueQueries.length, 0, "Startup must NOT run 10+ diagnostic PRAGMA page_count/freelist queries");
+  assert.equal(idleDelaySeen, 180 * 1000, "Idle PRAGMA optimize must be deferred to 180s off startup");
+  assert.equal(sysAccel.stats.sqliteInfo.cacheMB, 64);
+  // Preferences on-demand refresh populates full stats
+  await sysAccel.refreshSQLiteInfo();
+  assert.ok(valueQueries.length >= 6, "On-demand refreshSQLiteInfo() must query full diagnostics when Preferences opens");
+  await sysAccel.shutdown();
+
+  // 2. TabHibernator with startupHibernateBackgroundTabs=true hibernates ALL restored background PDF tabs
+  const unloaded2 = [];
+  const mockTabs2 = [
+    { id: "lib", type: "library" },
+    { id: "pdf-active", type: "reader", timeUnselected: 0, data: { itemID: 1 } },
+    { id: "pdf-bg-1", type: "reader", timeUnselected: 1000, data: { itemID: 2 } },
+    { id: "pdf-bg-2", type: "reader", timeUnselected: 500, data: { itemID: 3 } },
+  ];
+  const mockWin2 = {
+    closed: false,
+    document: {
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElementNS: () => ({ remove() {} }),
+      head: { appendChild() {} },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    Zotero_Tabs: {
+      _tabs: mockTabs2,
+      selectedID: "pdf-active",
+      canUnload: (id) => id !== "pdf-active" && id !== "lib",
+      unload(id) {
+        unloaded2.push(id);
+        const t = mockTabs2.find((x) => x.id === id);
+        if (t) t.type = "reader-unloaded";
+      },
+      unloadUnusedTabs() {},
+    },
+  };
+  const thCtx2 = vm.createContext({
+    Zotero: {
+      getMainWindows: () => [mockWin2],
+      Date: { getUnixTimestamp: () => 1010 },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      Items: { getAsync: async () => null },
+      debug() {},
+    },
+    Services: { obs: { addObserver() {}, removeObserver() {} }, focus: { activeWindow: mockWin2 } },
+    Components: { classes: {}, interfaces: {} },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout, setInterval, clearInterval }) },
+  });
+  loadScriptInContext("src/tab-hibernator.js", thCtx2);
+  const hib2 = new thCtx2.ZotTurboTabHibernator.TabHibernator({
+    getPref: (_k, d) => d, // startupHibernateBackgroundTabs defaults to true
+    nativeClient: { trim: async () => {}, evictPath: async () => {} },
+    startupSweepDelayMs: 30,
+  });
+  hib2.init();
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(unloaded2, ["pdf-bg-1", "pdf-bg-2"], "Default startup sweep must hibernate ALL restored background PDF tabs while preserving active tab");
+  hib2.shutdown();
+
+  // 3. ReaderHook coalesces rapid tab add/select bursts into a single debounced scan
+  let notifyCb = null;
+  const rhCtx4 = vm.createContext({
+    Zotero: {
+      Reader: { _readers: [] },
+      Items: { getAsync: async () => null },
+      Notifier: { registerObserver: (o) => { notifyCb = o.notify; return 1; }, unregisterObserver() {} },
+      File: { getResourceAsync: async () => "" },
+      debug() {},
+      logError() {},
+    },
+    Services: { wm: { getMostRecentWindow: () => null } },
+    Components: { utils: { cloneInto: (x) => x, exportFunction: (f) => f, unwaiveXrays: (x) => x } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+  });
+  loadScriptInContext("src/reader-hook.js", rhCtx4);
+  const rh4 = new rhCtx4.ZotMuPDFReaderHook.ReaderHook({
+    pluginID: "zt",
+    rootURI: "file:///",
+    engineClient: { onStatsChange: () => () => {}, isEnabled: () => true, isReady: () => false },
+  });
+  await rh4.init();
+  let scanCount = 0;
+  rh4._scanAllReaders = () => { scanCount++; };
+  for (let i = 0; i < 6; i++) notifyCb("add", "tab");
+  assert.equal(scanCount, 0, "Burst tab add events must be debounced");
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(scanCount, 1, "6 rapid tab add events must coalesce into 1 initial scan");
+  rh4.shutdown();
+  assert.equal(rh4._scanTimer, null);
+  assert.equal(rh4._scanFollowupTimer, null);
+
+  console.log("  PASS: Deferred SQLite diagnostics, 180s optimize, all-background startup hibernation & coalesced scan verified");
+}
+
+console.log("\n[ALL 19 VERIFICATION SUITES PASSED]");

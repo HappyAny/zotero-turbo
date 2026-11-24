@@ -25,6 +25,7 @@ const ZOT_TURBO_DEFAULTS = {
   processedDataMaxPages: 100,
   // Module 3: Smart Background Tab Hibernation & Window-Idle Auto-Slim
   tabHibernateEnabled: true,
+  startupHibernateBackgroundTabs: true,
   tabHibernateMaxLoaded: 2,
   tabHibernateIdleMin: 10,
   tabHibernateNotes: false,
@@ -212,7 +213,7 @@ async function startup({ id, version, rootURI }) {
       nativeClient,
       renderEngine,
       onBackgroundSlim: () => plugin.backgroundSlimMemory(),
-      startupSweepDelayMs: 6000,
+      startupSweepDelayMs: 4000,
     });
     const searchAccel = new globalThis.ZotTurboSearchAccel.SearchAccelerator({
       nativeClient,
