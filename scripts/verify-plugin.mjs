@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.8.0");
+  assert.equal(manifest.version, "0.9.0");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -77,7 +77,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.8.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.9.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -1760,4 +1760,129 @@ console.log("=== [Check 15] v0.8.0 features: Main UI selection coalescing, ItemT
   console.log("  PASS: Main UI selection coalescing + ItemTree overscan + async OffscreenCanvas thumbs + dirty-checked capsule verified");
 }
 
-console.log("\n[ALL 15 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 16] v0.9.0: Reader Text ASCII/Diacritic Fast-Path & Elastic Native Worker Pool ===");
+{
+  // 1. Verify reader-text-patch.js hoists SPECIALS/ASCII_CHARS and preserves diacritic + ligature normalization
+  const rtpSrc = fs.readFileSync(path.join(PLUGIN_DIR, "src/reader-text-patch.js"), "utf8");
+  assert.ok(rtpSrc.includes("const ASCII_CHARS ="), "reader-text-patch.js must precompute ASCII_CHARS table");
+  assert.ok(rtpSrc.includes("const SPECIALS = Object.assign(Object.create(null)"), "reader-text-patch.js must hoist SPECIALS out of normalizeChar");
+  function MockDoc2() {}
+  MockDoc2.prototype.getPage = async () => ({ view: [0, 0, 612, 792], rotate: 0 });
+  MockDoc2.prototype.getPageData = async () => ({ partial: true, chars: [], overlays: [], viewBox: [0, 0, 612, 792] });
+  const doc2 = new MockDoc2();
+  const winCtx2 = vm.createContext({
+    Promise,
+    setTimeout,
+    clearTimeout,
+    PDFViewerApplication: { pdfDocument: doc2 },
+    __zotTurboTextBridge: {
+      isEnabled: () => true,
+      requestPageData: async () => ({
+        ok: true,
+        ms: 0.5,
+        json: JSON.stringify({
+          b: [0, 0, 612, 792],
+          f: ["Times"],
+          c: [
+            [65, 10, 10, 20, 20, 10, 10, 20, 20, 12, 0, 0, 0], // 'A' (ASCII fast-path)
+            [0x00e9, 20, 10, 30, 20, 20, 10, 30, 20, 12, 0, 0, 0], // 'é' -> stays 'é' via SPECIALS
+            [0x00e7, 30, 10, 40, 20, 30, 10, 40, 20, 12, 0, 0, 0], // 'ç' -> stays 'ç' via SPECIALS
+            [0xfb01, 40, 10, 50, 20, 40, 10, 50, 20, 12, 0, 0, 0], // 'ﬁ' ligature -> 'fi' via NFKD
+          ],
+          l: [],
+        }),
+      }),
+      reportHit() {},
+      reportFallback() {},
+    },
+  });
+  winCtx2.window = winCtx2;
+  loadScriptInContext("src/reader-text-patch.js", winCtx2);
+  const pd = await doc2.getPageData({ pageIndex: 0 });
+  assert.deepEqual(
+    Array.from(pd.chars, (x) => x.c),
+    ["A", "é", "ç", "fi"],
+    "Hoisted SPECIALS + ASCII fast-path must preserve exact char normalization"
+  );
+  winCtx2.__zotTurboUnpatchText();
+
+  // 2. Verify NativeClient elastic worker pool: 1 baseline -> burst up to 3 -> idle reap back to 1
+  let workersSpawned = 0;
+  let workersTerminated = 0;
+  class MockChromeWorker {
+    constructor() {
+      this.id = ++workersSpawned;
+      this.onmessage = null;
+      this.onerror = null;
+    }
+    postMessage(msg) {
+      const delay = msg.op === "init" || msg.op === "shutdown" ? 5 : 25;
+      setTimeout(() => {
+        if (!this.onmessage) return;
+        if (msg.op === "init") {
+          this.onmessage({ data: { id: msg.id, ok: true, result: { version: "0.9.0" } } });
+        } else if (msg.op === "shutdown") {
+          this.onmessage({ data: { id: msg.id, ok: true, result: true } });
+        } else {
+          this.onmessage({ data: { id: msg.id, ok: true, result: { ok: true, workerId: this.id } } });
+        }
+      }, delay);
+    }
+    terminate() {
+      workersTerminated++;
+      this.onmessage = null;
+    }
+  }
+  const ncCtx = vm.createContext({
+    Zotero: { Profile: { dir: "C:\\mock" }, debug() {} },
+    Services: { appinfo: { OS: "WINNT", XPCOMABI: "x86_64-msvc" }, prefs: {} },
+    Components: {},
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }) },
+    ChromeWorker: MockChromeWorker,
+    IOUtils: {
+      makeDirectory: async () => {},
+      stat: async () => ({ size: 2000000 }),
+    },
+    PathUtils: {
+      profileDir: "C:\\mock",
+      join: (...parts) => parts.join("\\"),
+    },
+  });
+  loadScriptInContext("src/native-client.js", ncCtx);
+  const client = new ncCtx.ZotTurboNativeClient.NativeClient({
+    rootURI: "file:///mock/",
+    version: "0.9.0",
+    minWorkers: 1,
+    maxWorkers: 3,
+    burstReapMs: 80,
+  });
+  const started = await client.ensureStarted();
+  assert.equal(started, true);
+  assert.equal(client.slots.length, 1, "Elastic pool must start with only 1 lean baseline worker");
+  assert.equal(workersSpawned, 1);
+
+  // Trigger concurrent requests -> should burst up to 2 then 3 workers
+  const burst1 = Promise.all([
+    client.extractPageData("a.pdf", 0),
+    client.extractPageData("a.pdf", 1),
+  ]);
+  await new Promise((r) => setTimeout(r, 12));
+  const burst2 = Promise.all([
+    client.extractPageData("a.pdf", 2),
+    client.extractPageData("a.pdf", 3),
+    client.extractPageData("a.pdf", 4),
+  ]);
+  await Promise.all([burst1, burst2]);
+  assert.ok(client.slots.length >= 2 && client.slots.length <= 3, `Expected elastic burst to 2-3 workers, got ${client.slots.length}`);
+
+  // Wait for burstReapMs to elapse -> extra workers must auto-reap back down to 1
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(client.slots.length, 1, "Idle burst workers must auto-reap back to 1 baseline worker");
+  assert.ok(workersTerminated >= 1, "Reaped burst workers must be terminated cleanly");
+  await client.shutdown();
+  assert.equal(client.slots.length, 0);
+
+  console.log("  PASS: Reader text ASCII/diacritic fast-path & elastic 1->3->1 NativeClient worker pool verified");
+}
+
+console.log("\n[ALL 16 VERIFICATION SUITES PASSED]");

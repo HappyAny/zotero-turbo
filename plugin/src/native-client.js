@@ -7,6 +7,10 @@ var ZotTurboNativeClient = (function () {
   const PREF_PREFIX = "extensions.zotero-turbo.";
   const WORKER_URL = "chrome://zoturbo/content/native-worker.js";
   const IDLE_TRIM_MS = 25000;
+  const DEFAULT_MIN_WORKERS = 1;
+  const DEFAULT_MAX_WORKERS = 3;
+  const DEFAULT_BURST_REAP_MS = 60000;
+  const WORKER_STORE_MB = 32;
 
   function getNativeBinarySpec() {
     const os = String(Services.appinfo?.OS || "").toLowerCase();
@@ -120,9 +124,12 @@ var ZotTurboNativeClient = (function () {
   }
 
   class NativeClient {
-    constructor({ rootURI, version }) {
+    constructor({ rootURI, version, minWorkers = DEFAULT_MIN_WORKERS, maxWorkers = DEFAULT_MAX_WORKERS, burstReapMs = DEFAULT_BURST_REAP_MS }) {
       this.rootURI = rootURI;
       this.version = version;
+      this.minWorkers = Math.max(1, minWorkers);
+      this.maxWorkers = Math.max(this.minWorkers, maxWorkers);
+      this.burstReapMs = Math.max(50, burstReapMs);
       this.slots = [];
       this.dllPath = null;
       this.nativeVersion = null;
@@ -131,8 +138,11 @@ var ZotTurboNativeClient = (function () {
       this.initError = null;
       this._extractPromise = null;
       this._startPromise = null;
+      this._spawningBurst = false;
       this._idleTimer = null;
+      this._reapTimer = null;
       this._destroyed = false;
+      this._nextSlotIndex = 0;
       this._rr = 0;
     }
 
@@ -257,14 +267,18 @@ var ZotTurboNativeClient = (function () {
         try {
           const dllPath = await this.ensureBinaryPath();
           this.dllPath = dllPath;
-          const workerCount = 3;
-          const storeMB = 32;
+          // Elastic worker pool: start lean with 1 baseline worker (~32 MB MuPDF store)
+          // and dynamically burst up to maxWorkers (3) only under concurrent load.
           const created = [];
-          for (let i = 0; i < workerCount; i++) {
-            const slot = new NativeWorkerSlot(i);
-            const res = await slot.start(dllPath, storeMB);
+          for (let i = 0; i < this.minWorkers; i++) {
+            const slot = new NativeWorkerSlot(this._nextSlotIndex++);
+            const res = await slot.start(dllPath, WORKER_STORE_MB);
             this.nativeVersion = res?.version || this.version;
             created.push(slot);
+          }
+          if (this._destroyed) {
+            await Promise.all(created.map((s) => s.shutdown().catch(() => {})));
+            return false;
           }
           this.slots = created;
           this.available = true;
@@ -283,6 +297,67 @@ var ZotTurboNativeClient = (function () {
       return this._startPromise;
     }
 
+    _maybeSpawnBurstWorker() {
+      if (this._destroyed || this._spawningBurst || !this.dllPath || this.slots.length >= this.maxWorkers) {
+        return;
+      }
+      this._spawningBurst = true;
+      const slot = new NativeWorkerSlot(this._nextSlotIndex++);
+      slot
+        .start(this.dllPath, WORKER_STORE_MB)
+        .then(() => {
+          if (this._destroyed || this.slots.length >= this.maxWorkers) {
+            slot.shutdown().catch(() => {});
+            return;
+          }
+          this.slots.push(slot);
+          this._touchBurstReap();
+        })
+        .catch((err) => {
+          Zotero.debug("[ZotTurbo] Elastic burst worker spawn skipped: " + (err?.message || String(err)));
+        })
+        .finally(() => {
+          this._spawningBurst = false;
+        });
+    }
+
+    _touchBurstReap() {
+      if (this._reapTimer) {
+        clearTimeout(this._reapTimer);
+        this._reapTimer = null;
+      }
+      if (this._destroyed || this.slots.length <= this.minWorkers) return;
+      this._reapTimer = setTimeout(() => {
+        this._reapTimer = null;
+        this._reapIdleBurstWorkers();
+      }, this.burstReapMs);
+    }
+
+    _reapIdleBurstWorkers() {
+      if (this._destroyed || this.slots.length <= this.minWorkers) return;
+      const keep = [];
+      const toClose = [];
+      for (let i = 0; i < this.slots.length; i++) {
+        const s = this.slots[i];
+        if (keep.length < this.minWorkers) {
+          keep.push(s);
+        } else if (s.inFlight === 0 && s.pending.size === 0) {
+          toClose.push(s);
+        } else {
+          keep.push(s);
+        }
+      }
+      if (toClose.length > 0) {
+        this.slots = keep;
+        for (const s of toClose) {
+          s.shutdown().catch(() => {});
+        }
+      }
+      if (this.slots.length > this.minWorkers) {
+        this._touchBurstReap();
+      }
+    }
+
     _pickSlot() {
       const readySlots = this.slots.filter((s) => s.ready);
       if (readySlots.length === 0) return null;
@@ -292,8 +367,14 @@ var ZotTurboNativeClient = (function () {
           best = readySlots[i];
         }
       }
+      if (best.inFlight > 0 && this.slots.length < this.maxWorkers) {
+        this._maybeSpawnBurstWorker();
+      }
       if (readySlots.every((s) => s.inFlight === best.inFlight)) {
         best = readySlots[this._rr++ % readySlots.length];
+      }
+      if (this.slots.length > this.minWorkers) {
+        this._touchBurstReap();
       }
       return best;
     }
@@ -395,6 +476,10 @@ var ZotTurboNativeClient = (function () {
       if (this._idleTimer) {
         clearTimeout(this._idleTimer);
         this._idleTimer = null;
+      }
+      if (this._reapTimer) {
+        clearTimeout(this._reapTimer);
+        this._reapTimer = null;
       }
       const list = this.slots.splice(0);
       await Promise.all(list.map((s) => s.shutdown().catch(() => {})));

@@ -1,17 +1,17 @@
 # Zotero Turbo
 
-**Zotero 一体化原生性能加速套件（v0.8.0）**（适用于 Zotero 7–10）——以**单个统一的 MuPDF 1.28.0 原生 C 动态库**，集成完整 `zotero-mupdf-engine` 渲染引擎与全部 6 大周边性能加速器。
+**Zotero 一体化原生性能加速套件（v0.9.0）**（适用于 Zotero 7–10）——以**单个统一的 MuPDF 1.28.0 原生 C 动态库**，集成完整 `zotero-mupdf-engine` 渲染引擎与全部 6 大周边性能加速器。
 
 ## 7 大核心模块（单 DLL 统一驱动，均支持在设置面板独立开关）
 
 1. **⚡ MuPDF 1.28.0 原生 PDF 渲染引擎**（原 `zotero-mupdf-engine` 完整合入）
    - 进程内无锁多线程 `ChromeWorker + js-ctypes` 光栅化（页面 + 侧栏缩略图离主线程 `OffscreenCanvas.convertToBlob` 异步编码），全 DLL 统一 `FZ_LOCK_FREETYPE` 线程锁，保留 100% 原生高亮、批注、选字、护眼/暗色主题与第三方插件兼容。
    - 256 项 L1 查表暗色/护眼 LUT、Skia 软件画布 120Hz 自适应 `rAF` 6 段离屏分帧绘制、方向感知最低优先级后台预渲染、可选高分屏 DPR 上限（`maxOutputScale`）、阅读器工具栏状态胶囊（脏检查免冗余 DOM 写入、左键切换引擎、**右键一键深度释放内存/休眠后台标签/直达设置**）、支持无需重启 Zotero 的热重载与一键释放缓存。
-2. **📄 PDF 全文、拖入识别、批注检测、Ctrl+F 搜索、大纲 & Worker 内存治理**（共用同一 MuPDF DLL，3-Worker 并发池 + 零循环 C++ 字符串解码）
+2. **📄 PDF 全文、拖入识别、批注检测、Ctrl+F 搜索、大纲 & Worker 内存治理**（共用同一 MuPDF DLL，**弹性 1→3 Worker 池（空闲 60s 自动回收）+ 启动错峰预热** + 零循环 C++ 字符串解码）
    - **原生全文提取**：替换 `Zotero.PDFWorker.getFullText`，单篇/重建索引提速 **9–30×**。
    - **批量建索引并发流水线**：拦截 `Zotero.Fulltext.indexItems`，3 路原生 MuPDF 滑动窗口提前预取，批量导入/重建整库索引再快 **2–3×**。
    - **拖入 PDF 元数据识别 & 嵌入式批注秒测**：原生接管 `Zotero.PDFWorker.getRecognizerData` 与 `Zotero.PDFWorker.hasAnnotations`（`< 0.5 ms`）。
-   - **阅读器文本层 & Ctrl+F 全书并行搜索**：原生加速 `getPageData`（单页降至 **1–5 ms**）；自动识别 `Ctrl+F` 顺序扫页并启动 **3 线程 +6 页前瞻预取**，且不唤醒 PDF.js Worker 爆内存；可见页/旋转页/扫描页自动无缝校验或回退。
+   - **阅读器文本层 & Ctrl+F 全书并行搜索**：原生加速 `getPageData`（单页降至 **1–5 ms**，内置零分配 ASCII/变音符快路径）；自动识别 `Ctrl+F` 顺序扫页并启动 **3 线程 +6 页前瞻预取**，且不唤醒 PDF.js Worker 爆内存；可见页/旋转页/扫描页自动无缝校验或回退。
    - **秒开侧栏文档大纲**：原生 `fz_load_outline` 接管 `getOutline2`（**< 0.5 ms**），无内嵌书签时自动回退 Zotero 智能标题识别。
    - **引用弹窗安全保护 & PDF.js Worker 自动清理**：默认完整保留 100% 文内引用弹窗（延迟 1.5s 防开篇卡顿，可调页数上限），扫描完成后自动调用 `pdfDocument.cleanup(true)` 回收冗余堆内存（保留已加载字体以保障选字与渲染）。
 3. **💤 智能后台标签页休眠器**

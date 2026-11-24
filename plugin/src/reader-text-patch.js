@@ -52,17 +52,20 @@
     prefetchMap.set(pageIndex, p);
   }
 
+  const ASCII_CHARS = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
+  const SPECIALS = Object.assign(Object.create(null), {
+    "e\u0301": "é", "a\u0301": "á", "i\u0301": "í", "o\u0301": "ó", "u\u0301": "ú",
+    "e\u0300": "è", "a\u0300": "à", "i\u0300": "ì", "o\u0300": "ò", "u\u0300": "ù",
+    "e\u0302": "ê", "a\u0302": "â", "i\u0302": "î", "o\u0302": "ô", "u\u0302": "û",
+    "e\u0308": "ë", "a\u0308": "ä", "i\u0308": "ï", "o\u0308": "ö", "u\u0308": "ü",
+    "c\u0327": "ç", "n\u0303": "ñ",
+  });
+
   function normalizeChar(ch) {
     if (!ch) return ch;
+    if (ch.length === 1 && ch.charCodeAt(0) < 128) return ch;
     const nfkd = ch.normalize("NFKD");
-    const specials = {
-      "e\u0301": "é", "a\u0301": "á", "i\u0301": "í", "o\u0301": "ó", "u\u0301": "ú",
-      "e\u0300": "è", "a\u0300": "à", "i\u0300": "ì", "o\u0300": "ò", "u\u0300": "ù",
-      "e\u0302": "ê", "a\u0302": "â", "i\u0302": "î", "o\u0302": "ô", "u\u0302": "û",
-      "e\u0308": "ë", "a\u0308": "ä", "i\u0308": "ï", "o\u0308": "ö", "u\u0308": "ü",
-      "c\u0327": "ç", "n\u0303": "ñ",
-    };
-    return specials[nfkd] || nfkd;
+    return SPECIALS[nfkd] || nfkd;
   }
 
   function makeSortIndex(pageIndex, offset) {
@@ -83,26 +86,29 @@
     const fonts = raw.f || [];
     const rawChars = raw.c || [];
     const chars = new Array(rawChars.length);
+    const ox = vx0 - bx0;
+    const oy = vy1 + by0;
 
     for (let i = 0; i < rawChars.length; i++) {
       const t = rawChars[i];
       const cp = t[0];
-      const u = String.fromCodePoint(cp);
-      const rx0 = vx0 + (t[1] - bx0);
-      const ry0 = vy1 - (t[4] - by0);
-      const rx1 = vx0 + (t[3] - bx0);
-      const ry1 = vy1 - (t[2] - by0);
-      const lx0 = vx0 + (t[5] - bx0);
-      const ly0 = vy1 - (t[8] - by0);
-      const lx1 = vx0 + (t[7] - bx0);
-      const ly1 = vy1 - (t[6] - by0);
+      const u = cp < 128 ? ASCII_CHARS[cp] : String.fromCodePoint(cp);
+      const c = cp < 128 ? u : normalizeChar(u);
+      const rx0 = ox + t[1];
+      const ry0 = oy - t[4];
+      const rx1 = ox + t[3];
+      const ry1 = oy - t[2];
+      const lx0 = ox + t[5];
+      const ly0 = oy - t[8];
+      const lx1 = ox + t[7];
+      const ly1 = oy - t[6];
       const flags = t[11];
 
       const obj = {
-        c: normalizeChar(u),
+        c,
         u,
-        rect: [Math.min(rx0, rx1), Math.min(ry0, ry1), Math.max(rx0, rx1), Math.max(ry0, ry1)],
-        inlineRect: [Math.min(lx0, lx1), Math.min(ly0, ly1), Math.max(lx0, lx1), Math.max(ly0, ly1)],
+        rect: [rx0 <= rx1 ? rx0 : rx1, ry0 <= ry1 ? ry0 : ry1, rx0 >= rx1 ? rx0 : rx1, ry0 >= ry1 ? ry0 : ry1],
+        inlineRect: [lx0 <= lx1 ? lx0 : lx1, ly0 <= ly1 ? ly0 : ly1, lx0 >= lx1 ? lx0 : lx1, ly0 >= ly1 ? ly0 : ly1],
         fontSize: t[9],
         fontName: fonts[t[10]] || "",
         bold: (flags & 1) !== 0,
