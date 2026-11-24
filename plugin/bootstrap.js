@@ -20,6 +20,8 @@ const ZOT_TURBO_DEFAULTS = {
   readerOutlineEnabled: true,
   pdfjsCleanupEnabled: true,
   processedDataDelayMs: 1500,
+  startupGraceSec: 45,
+  startupProcessedDataDelayMs: 12000,
   processedDataMaxPages: 100,
   // Module 3: Smart Background Tab Hibernation & Window-Idle Auto-Slim
   tabHibernateEnabled: true,
@@ -132,6 +134,7 @@ function uninstall() {}
 
 async function startup({ id, version, rootURI }) {
   try {
+    const startupAt = Date.now();
     await Zotero.initializationPromise;
 
     // Register chrome://zoturbo/content/ (src/) & chrome://zoturboui/content/ (content/)
@@ -202,12 +205,14 @@ async function startup({ id, version, rootURI }) {
       rootURI,
       nativeClient,
       getPref,
+      startupAt,
     });
     const tabHibernator = new globalThis.ZotTurboTabHibernator.TabHibernator({
       getPref,
       nativeClient,
       renderEngine,
       onBackgroundSlim: () => plugin.backgroundSlimMemory(),
+      startupSweepDelayMs: 6000,
     });
     const searchAccel = new globalThis.ZotTurboSearchAccel.SearchAccelerator({
       nativeClient,
@@ -454,7 +459,7 @@ async function startup({ id, version, rootURI }) {
         nativeClient.ensureStarted().catch((err) => {
           Zotero.debug("[ZotTurbo] Native text/scanner warm-up notice: " + (err?.message || String(err)));
         });
-      }, 800);
+      }, 3000);
     }
 
     Zotero.debug(`[ZotTurbo] Plugin v${version} initialized (unified 7-module native acceleration suite, on-demand standby=${!hasOpenReaders})`);

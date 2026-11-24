@@ -6,10 +6,11 @@ var ZotTurboPDFTextAccel = (function () {
   const { setTimeout, clearTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
 
   class PDFTextAccelerator {
-    constructor({ rootURI, nativeClient, getPref }) {
+    constructor({ rootURI, nativeClient, getPref, startupAt = Date.now() }) {
       this.rootURI = rootURI;
       this.native = nativeClient;
       this.getPref = getPref;
+      this._startupAt = Number(startupAt) || Date.now();
       this._origGetFullText = null;
       this._wrappedGetFullText = null;
       this._origGetRecognizerData = null;
@@ -386,7 +387,15 @@ var ZotTurboPDFTextAccel = (function () {
                 return !self._destroyed && !!self.getPref("pdfjsCleanupEnabled", true);
               },
               getProcessedDataDelayMs() {
-                return Math.max(0, Math.min(10000, Number(self.getPref("processedDataDelayMs", 1500)) || 0));
+                const base = Math.max(0, Math.min(10000, Number(self.getPref("processedDataDelayMs", 1500)) || 0));
+                const graceSec = Math.max(0, Math.min(180, Number(self.getPref("startupGraceSec", 45)) || 0));
+                if (graceSec > 0 && Date.now() - self._startupAt < graceSec * 1000) {
+                  return Math.max(
+                    base,
+                    Math.min(25000, Number(self.getPref("startupProcessedDataDelayMs", 12000)) || 12000)
+                  );
+                }
+                return base;
               },
               getProcessedDataMaxPages() {
                 const v = Number(self.getPref("processedDataMaxPages", 100));

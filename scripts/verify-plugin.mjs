@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.10.0");
+  assert.equal(manifest.version, "0.11.0");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -77,7 +77,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.10.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.11.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2006,4 +2006,161 @@ console.log("=== [Check 17] v0.10.0: Pure On-Demand MuPDF Engine Wake & Auto-Sle
   console.log("  PASS: On-demand MuPDF wake, PDF-free auto-sleep, and 0-worker NativeClient standby verified");
 }
 
-console.log("\n[ALL 17 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 18] v0.11.0: Cold-Start Grace Window & Early Startup Tab Hibernation ===");
+{
+  // 1. PDFTextAccelerator extends getProcessedDataDelayMs() to 12s during first 45s cold-start grace window
+  const capturedBridges = [];
+  const makeViewerWin = () => {
+    const w = {
+      closed: false,
+      Promise,
+      eval() {
+        capturedBridges.push(w.__zotTurboTextBridge);
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    w.wrappedJSObject = w;
+    return w;
+  };
+  const ptaCtx = vm.createContext({
+    Zotero: {
+      PDFWorker: {},
+      Items: {
+        async getAsync() {
+          return { isPDFAttachment: () => true, getFilePathAsync: async () => "C:\\papers\\startup.pdf" };
+        },
+      },
+      File: { getResourceAsync: async () => "" },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      Reader: { _readers: [] },
+      debug() {},
+    },
+    Services: {},
+    Components: { utils: { cloneInto: (x) => x, isDeadWrapper: () => false } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }) },
+  });
+  loadScriptInContext("src/pdf-text-accel.js", ptaCtx);
+
+  const prefs = { processedDataDelayMs: 1500, startupGraceSec: 45, startupProcessedDataDelayMs: 12000 };
+  const accelFresh = new ptaCtx.ZotTurboPDFTextAccel.PDFTextAccelerator({
+    rootURI: "file:///mock/",
+    nativeClient: { evictPath: async () => {} },
+    getPref: (k, d) => (k in prefs ? prefs[k] : d),
+    startupAt: Date.now(),
+  });
+  await accelFresh.init();
+  const vw1 = makeViewerWin();
+  accelFresh._attachReader({
+    type: "pdf",
+    itemID: 1,
+    _iframeWindow: { document: { querySelector: () => ({ contentWindow: vw1 }) } },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(capturedBridges.length, 1);
+  assert.equal(capturedBridges[0].getProcessedDataDelayMs(), 12000, "Cold-start grace window must defer getProcessedData to 12s");
+  // Simulate > 45s elapsed -> reverts cleanly to normal 1.5s delay
+  accelFresh._startupAt = Date.now() - 60_000;
+  assert.equal(capturedBridges[0].getProcessedDataDelayMs(), 1500, "After 45s grace window, delay reverts to normal 1.5s");
+  accelFresh.shutdown();
+
+  // 2. reader-text-patch.js aborts getProcessedData cleanly if tab is unpatched/hibernated during defer delay
+  let origProcessedCalls = 0;
+  function MockDoc3() {
+    this.numPages = 20;
+  }
+  MockDoc3.prototype.getPageData = async () => ({ chars: [] });
+  MockDoc3.prototype.getProcessedData = async () => {
+    origProcessedCalls++;
+    return { pages: { 0: { overlays: [] } } };
+  };
+  const doc3 = new MockDoc3();
+  const winCtx3 = vm.createContext({
+    Promise,
+    setTimeout,
+    clearTimeout,
+    closed: false,
+    PDFViewerApplication: { pdfDocument: doc3 },
+    __zotTurboTextBridge: {
+      isEnabled: () => true,
+      getProcessedDataDelayMs: () => 50,
+      getProcessedDataMaxPages: () => 100,
+    },
+  });
+  winCtx3.window = winCtx3;
+  loadScriptInContext("src/reader-text-patch.js", winCtx3);
+  const pendingProcessed = doc3.getProcessedData({});
+  // Hibernate/unpatch tab after 15ms (before 50ms defer completes)
+  await new Promise((r) => setTimeout(r, 15));
+  winCtx3.__zotTurboUnpatchText();
+  const abortedResult = await pendingProcessed;
+  assert.deepEqual(JSON.parse(JSON.stringify(abortedResult)), { pages: {} });
+  assert.equal(origProcessedCalls, 0, "Hibernated/unpatched tab must not wake PDF.js getProcessedData()");
+
+  // 3. TabHibernator early startup restore sweep hibernates excess background tabs at t+startupSweepDelayMs
+  const unloadedIds = [];
+  const mockTabs = [
+    { id: "lib", type: "library" },
+    { id: "pdf-active", type: "reader", timeUnselected: 0, data: { itemID: 1 } },
+    { id: "pdf-recent", type: "reader", timeUnselected: 1000, data: { itemID: 2 } },
+    { id: "pdf-oldest", type: "reader", timeUnselected: 500, data: { itemID: 3 } },
+  ];
+  const mockWin = {
+    closed: false,
+    document: {
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElementNS: () => ({ remove() {} }),
+      head: { appendChild() {} },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    Zotero_Tabs: {
+      _tabs: mockTabs,
+      selectedID: "pdf-active",
+      canUnload: (id) => id !== "pdf-active" && id !== "lib",
+      unload(id) {
+        unloadedIds.push(id);
+        const t = mockTabs.find((x) => x.id === id);
+        if (t) t.type = "reader-unloaded";
+      },
+      unloadUnusedTabs() {},
+    },
+  };
+  const thCtx = vm.createContext({
+    Zotero: {
+      getMainWindows: () => [mockWin],
+      Date: { getUnixTimestamp: () => 1010 },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      Items: { getAsync: async () => null },
+      debug() {},
+    },
+    Services: { obs: { addObserver() {}, removeObserver() {} }, focus: { activeWindow: mockWin } },
+    Components: { classes: {}, interfaces: {} },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout, setInterval, clearInterval }) },
+  });
+  loadScriptInContext("src/tab-hibernator.js", thCtx);
+  const hibernator = new thCtx.ZotTurboTabHibernator.TabHibernator({
+    getPref: (k, d) => (k === "tabHibernateMaxLoaded" ? 2 : d),
+    nativeClient: { trim: async () => {}, evictPath: async () => {} },
+    startupSweepDelayMs: 35,
+  });
+  hibernator.init();
+  assert.equal(unloadedIds.length, 0);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(unloadedIds, ["pdf-oldest"], "Early startup sweep must hibernate excess 3rd restored PDF tab");
+  hibernator.shutdown();
+  assert.equal(hibernator._startupSweepTimer, null);
+
+  // 4. Verify bootstrap.js wires startupAt, startupSweepDelayMs and staggered 3s nativeClient warmup
+  const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
+  assert.ok(bootSrc.includes("startupGraceSec: 45"), "bootstrap.js must define startupGraceSec default");
+  assert.ok(bootSrc.includes("startupProcessedDataDelayMs: 12000"), "bootstrap.js must define startupProcessedDataDelayMs default");
+  assert.ok(bootSrc.includes("startupSweepDelayMs: 6000"), "bootstrap.js must enable early startup tab sweep");
+  assert.ok(bootSrc.includes("}, 3000);"), "bootstrap.js must stagger non-urgent nativeClient warmup to 3s");
+
+  console.log("  PASS: Cold-start 45s grace window, aborted hibernated scan, and early startup tab hibernation verified");
+}
+
+console.log("\n[ALL 18 VERIFICATION SUITES PASSED]");

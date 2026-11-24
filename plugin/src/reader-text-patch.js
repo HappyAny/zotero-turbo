@@ -343,6 +343,10 @@
         if (delayMs > 0) {
           await new Promise((r) => setTimeout(r, delayMs));
         }
+        // If tab was hibernated or unpatched during the defer window, skip waking PDF.js Worker
+        if (window.closed || !window.__zotTurboTextPatched) {
+          return { pages: {} };
+        }
 
         try {
           const result = await capturedGetProcessedData.call(docSelf, data);

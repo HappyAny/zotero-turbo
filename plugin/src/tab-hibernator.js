@@ -9,13 +9,15 @@ var ZotTurboTabHibernator = (function () {
   const STYLE_ID = "zot-turbo-tab-hibernate-style";
 
   class TabHibernator {
-    constructor({ getPref, nativeClient, renderEngine = null, onBackgroundSlim = null }) {
+    constructor({ getPref, nativeClient, renderEngine = null, onBackgroundSlim = null, startupSweepDelayMs = 6000 }) {
       this.getPref = getPref;
       this.native = nativeClient;
       this.renderEngine = renderEngine;
       this.onBackgroundSlim = onBackgroundSlim;
+      this._startupSweepDelayMs = Math.max(0, Number(startupSweepDelayMs) || 0);
       this._winStates = new Map(); // win -> { origUnloadUnusedTabs, cleanups: [] }
       this._sweepTimer = null;
+      this._startupSweepTimer = null;
       this._memObserver = null;
       this._notifierID = null;
       this._lastMemTrimAt = 0;
@@ -45,6 +47,18 @@ var ZotTurboTabHibernator = (function () {
         }
         this._checkBackgroundAutoSlim();
       }, 60 * 1000);
+
+      // Early startup sweep: hibernate excess background restored PDF tabs quickly instead of waiting 60s
+      if (this._startupSweepDelayMs > 0) {
+        this._startupSweepTimer = setTimeout(() => {
+          this._startupSweepTimer = null;
+          if (this._destroyed || !this.getPref("tabHibernateEnabled", true)) return;
+          this.sweepAllWindows({ reason: "startup-restore" });
+        }, this._startupSweepDelayMs);
+        if (typeof this._startupSweepTimer === "object" && typeof this._startupSweepTimer.unref === "function") {
+          this._startupSweepTimer.unref();
+        }
+      }
 
       // Listen to Gecko memory-pressure signals to immediately hibernate background tabs
       this._memObserver = {
@@ -533,6 +547,10 @@ var ZotTurboTabHibernator = (function () {
 
     shutdown() {
       this._destroyed = true;
+      if (this._startupSweepTimer) {
+        clearTimeout(this._startupSweepTimer);
+        this._startupSweepTimer = null;
+      }
       if (this._sweepTimer) {
         clearInterval(this._sweepTimer);
         this._sweepTimer = null;
