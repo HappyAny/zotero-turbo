@@ -9,12 +9,25 @@ var ZotTurboTabHibernator = (function () {
   const STYLE_ID = "zot-turbo-tab-hibernate-style";
 
   class TabHibernator {
-    constructor({ getPref, nativeClient, renderEngine = null, onBackgroundSlim = null, startupSweepDelayMs = 4000 }) {
+    constructor({
+      getPref,
+      nativeClient,
+      renderEngine = null,
+      onBackgroundSlim = null,
+      startupAt = Date.now(),
+      startupSweepDelayMs = 4000,
+    }) {
       this.getPref = getPref;
       this.native = nativeClient;
       this.renderEngine = renderEngine;
       this.onBackgroundSlim = onBackgroundSlim;
+      this._startupAt = Number(startupAt) || Date.now();
       this._startupSweepDelayMs = Math.max(0, Number(startupSweepDelayMs) || 0);
+      this._didStartupLibrarySwitch = false;
+      this._userInteractedWithTabs = false;
+      this._preserveSessionHookOnShutdown = false;
+      this._origSetLastClosed = null;
+      this._wrappedSetLastClosed = null;
       this._winStates = new Map(); // win -> { origUnloadUnusedTabs, cleanups: [] }
       this._sweepTimer = null;
       this._startupSweepTimer = null;
@@ -34,7 +47,75 @@ var ZotTurboTabHibernator = (function () {
       };
     }
 
+    _normalizePaneStateForLibraryStart(paneState) {
+      if (!paneState || typeof paneState !== "object" || !Array.isArray(paneState.tabs)) {
+        return paneState;
+      }
+      const hasLibrary = paneState.tabs.some((t) => t && t.type === "library");
+      if (!hasLibrary) return paneState;
+      return {
+        ...paneState,
+        tabs: paneState.tabs.map((t) => {
+          if (!t || typeof t !== "object") return t;
+          if (t.type === "library") {
+            return { ...t, selected: true };
+          }
+          if (Object.prototype.hasOwnProperty.call(t, "selected")) {
+            const copy = { ...t };
+            delete copy.selected;
+            return copy;
+          }
+          return t;
+        }),
+      };
+    }
+
+    _ensureStartupLibraryTab(win) {
+      if (this._destroyed || this._didStartupLibrarySwitch || this._userInteractedWithTabs) return false;
+      if (!this.getPref("startupSelectLibraryTab", true)) return false;
+      if (Date.now() - this._startupAt > 20 * 1000) return false;
+      const zTabs = win?.Zotero_Tabs;
+      if (!zTabs || typeof zTabs.select !== "function" || !Array.isArray(zTabs._tabs)) return false;
+      if (!zTabs._tabs.some((t) => t && t.id === "zotero-pane")) return false;
+      if (!zTabs.selectedID || zTabs.selectedID === "zotero-pane") {
+        // Restored tabs already present with My Library active -> session.json booted cleanly;
+        // do not interfere if the user opens a PDF tab right after launch.
+        if (zTabs._tabs.length > 1) {
+          this._didStartupLibrarySwitch = true;
+        }
+        return false;
+      }
+      try {
+        zTabs.select("zotero-pane");
+        this._didStartupLibrarySwitch = true;
+        Zotero.debug("[ZotTurbo] Startup fallback: switched active tab to My Library (all tabs preserved)");
+        return true;
+      } catch (err) {
+        Zotero.debug("[ZotTurbo] startupSelectLibraryTab switch error: " + (err?.message || String(err)));
+        return false;
+      }
+    }
+
     init() {
+      // Hook Zotero.Session.setLastClosedZoteroPaneState so closing the last window preserves
+      // all open tabs while marking My Library selected for the next launch.
+      if (Zotero.Session && typeof Zotero.Session.setLastClosedZoteroPaneState === "function") {
+        const origSetLastClosed = Zotero.Session.setLastClosedZoteroPaneState;
+        this._origSetLastClosed = origSetLastClosed;
+        const self = this;
+        const wrappedSetLastClosed = function zotTurboSetLastClosedState(paneState) {
+          const shouldNormalize = self._destroyed
+            ? self._preserveSessionHookOnShutdown
+            : self.getPref("startupSelectLibraryTab", true);
+          if (shouldNormalize) {
+            return origSetLastClosed.call(this, self._normalizePaneStateForLibraryStart(paneState));
+          }
+          return origSetLastClosed.call(this, paneState);
+        };
+        this._wrappedSetLastClosed = wrappedSetLastClosed;
+        Zotero.Session.setLastClosedZoteroPaneState = wrappedSetLastClosed;
+      }
+
       for (const win of Zotero.getMainWindows()) {
         this.attachWindow(win);
       }
@@ -48,11 +129,19 @@ var ZotTurboTabHibernator = (function () {
         this._checkBackgroundAutoSlim();
       }, 60 * 1000);
 
-      // Early startup sweep: hibernate restored background PDF tabs quickly instead of waiting 60s
+      // Early startup sweep: switch fallback tab to My Library if old session.json booted on a PDF,
+      // then hibernate restored background PDF tabs quickly instead of waiting 60s
       if (this._startupSweepDelayMs > 0) {
         this._startupSweepTimer = setTimeout(() => {
           this._startupSweepTimer = null;
-          if (this._destroyed || !this.getPref("tabHibernateEnabled", true)) return;
+          if (this._destroyed) return;
+          if (this.getPref("startupSelectLibraryTab", true) && !this._didStartupLibrarySwitch) {
+            for (const win of Zotero.getMainWindows()) {
+              if (this._ensureStartupLibraryTab(win)) break;
+            }
+            this._didStartupLibrarySwitch = true;
+          }
+          if (!this.getPref("tabHibernateEnabled", true)) return;
           if (this.getPref("startupHibernateBackgroundTabs", true)) {
             this.hibernateAllBackground({ includeNotes: false, reason: "startup-restore" });
           } else {
@@ -140,6 +229,52 @@ var ZotTurboTabHibernator = (function () {
       };
       state.wrappedUnloadUnusedTabs = wrappedUnload;
       zTabs.unloadUnusedTabs = wrappedUnload;
+
+      // Hook ZoteroPane.getState so session.json always preserves all open tabs while marking
+      // My Library as the active tab on next launch (zero PDF readers mounted on cold startup!)
+      const pane = win.ZoteroPane;
+      if (pane && typeof pane.getState === "function") {
+        const origGetState = pane.getState;
+        state.origPaneGetState = origGetState;
+        const wrappedGetState = function zotTurboPaneGetState(...args) {
+          const res = origGetState.apply(this, args);
+          const shouldNormalize = self._destroyed
+            ? self._preserveSessionHookOnShutdown
+            : self.getPref("startupSelectLibraryTab", true);
+          if (shouldNormalize) {
+            return self._normalizePaneStateForLibraryStart(res);
+          }
+          return res;
+        };
+        state.wrappedPaneGetState = wrappedGetState;
+        pane.getState = wrappedGetState;
+      }
+
+      // Fallback on first launch after enabling: if old session.json booted into a PDF tab, switch to Library.
+      // If tabs are still restoring, also track user pointer/key input so we never override a user click.
+      this._ensureStartupLibraryTab(win);
+      if (
+        !this._didStartupLibrarySwitch &&
+        Date.now() - this._startupAt <= 20 * 1000 &&
+        doc &&
+        typeof doc.addEventListener === "function"
+      ) {
+        const markUserInteraction = () => {
+          this._userInteractedWithTabs = true;
+          try {
+            doc.removeEventListener("pointerdown", markUserInteraction, true);
+            doc.removeEventListener("keydown", markUserInteraction, true);
+          } catch {}
+        };
+        doc.addEventListener("pointerdown", markUserInteraction, { capture: true, passive: true });
+        doc.addEventListener("keydown", markUserInteraction, { capture: true, passive: true });
+        state.cleanups.push(() => {
+          try {
+            doc.removeEventListener("pointerdown", markUserInteraction, true);
+            doc.removeEventListener("keydown", markUserInteraction, true);
+          } catch {}
+        });
+      }
 
       // Hook tab-bar right-click menu via passive contextmenu + popupshowing on popupset
       let lastCtxTabID = null;
@@ -233,7 +368,7 @@ var ZotTurboTabHibernator = (function () {
         } catch {}
       });
 
-      const onUnloadWin = () => this.detachWindow(win);
+      const onUnloadWin = () => this.detachWindow(win, { preserveSessionHook: true });
       win.addEventListener("unload", onUnloadWin, { once: true });
       state.cleanups.push(() => {
         try {
@@ -287,7 +422,7 @@ var ZotTurboTabHibernator = (function () {
       return true;
     }
 
-    detachWindow(win) {
+    detachWindow(win, { preserveSessionHook = false } = {}) {
       const state = this._winStates.get(win);
       if (!state) return;
       this._winStates.delete(win);
@@ -300,6 +435,16 @@ var ZotTurboTabHibernator = (function () {
           win.Zotero_Tabs.unloadUnusedTabs === state.wrappedUnloadUnusedTabs
         ) {
           win.Zotero_Tabs.unloadUnusedTabs = state.origUnloadUnusedTabs;
+        }
+        if (
+          !preserveSessionHook &&
+          win &&
+          !win.closed &&
+          win.ZoteroPane &&
+          state.origPaneGetState &&
+          win.ZoteroPane.getState === state.wrappedPaneGetState
+        ) {
+          win.ZoteroPane.getState = state.origPaneGetState;
         }
       } catch {}
       for (const fn of state.cleanups) {
@@ -549,7 +694,9 @@ var ZotTurboTabHibernator = (function () {
       };
     }
 
-    shutdown() {
+    shutdown({ preserveSessionHook = false } = {}) {
+      const keepSession = !!preserveSessionHook && !!this.getPref("startupSelectLibraryTab", true);
+      this._preserveSessionHookOnShutdown = keepSession;
       this._destroyed = true;
       if (this._startupSweepTimer) {
         clearTimeout(this._startupSweepTimer);
@@ -565,6 +712,13 @@ var ZotTurboTabHibernator = (function () {
         } catch {}
         this._memObserver = null;
       }
+      if (!keepSession && this._origSetLastClosed && Zotero.Session) {
+        if (Zotero.Session.setLastClosedZoteroPaneState === this._wrappedSetLastClosed) {
+          Zotero.Session.setLastClosedZoteroPaneState = this._origSetLastClosed;
+        }
+        this._origSetLastClosed = null;
+        this._wrappedSetLastClosed = null;
+      }
       if (this._notifierID) {
         try {
           Zotero.Notifier.unregisterObserver(this._notifierID);
@@ -572,7 +726,7 @@ var ZotTurboTabHibernator = (function () {
         this._notifierID = null;
       }
       for (const win of [...this._winStates.keys()]) {
-        this.detachWindow(win);
+        this.detachWindow(win, { preserveSessionHook: keepSession });
       }
       this._winStates.clear();
     }

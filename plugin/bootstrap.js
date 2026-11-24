@@ -24,6 +24,7 @@ const ZOT_TURBO_DEFAULTS = {
   processedDataMaxPages: 100,
   // Module 3: Smart Background Tab Hibernation & Window-Idle Auto-Slim
   tabHibernateEnabled: true,
+  startupSelectLibraryTab: true,
   startupHibernateBackgroundTabs: true,
   tabHibernateMaxLoaded: 2,
   tabHibernateIdleMin: 10,
@@ -212,6 +213,7 @@ async function startup({ id, version, rootURI }) {
       nativeClient,
       renderEngine,
       onBackgroundSlim: () => plugin.backgroundSlimMemory(),
+      startupAt,
       startupSweepDelayMs: 4000,
     });
     const searchAccel = new globalThis.ZotTurboSearchAccel.SearchAccelerator({
@@ -469,12 +471,13 @@ function onMainWindowLoad({ window }) {
 
 function onMainWindowUnload({ window }) {
   try {
-    ZotTurboPlugin?.tabHibernator?.detachWindow(window);
+    ZotTurboPlugin?.tabHibernator?.detachWindow(window, { preserveSessionHook: true });
     ZotTurboPlugin?.uiAccel?.detachWindow(window);
   } catch {}
 }
 
-async function shutdown() {
+async function shutdown(_data, reason) {
+  const isAppShutdown = reason === (typeof APP_SHUTDOWN === "number" ? APP_SHUTDOWN : 2);
   if (ZotTurboPrefPaneID) {
     try {
       Zotero.PreferencePanes?.unregister?.(ZotTurboPrefPaneID);
@@ -492,7 +495,7 @@ async function shutdown() {
     try { p.uiAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.pdfTextAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.renderHook?.shutdown(); } catch (e) { Zotero.logError(e); }
-    try { p.tabHibernator?.shutdown(); } catch (e) { Zotero.logError(e); }
+    try { p.tabHibernator?.shutdown({ preserveSessionHook: isAppShutdown }); } catch (e) { Zotero.logError(e); }
     try { p.searchAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { p.citeAccel?.shutdown(); } catch (e) { Zotero.logError(e); }
     try { await p.systemAccel?.shutdown(); } catch (e) { Zotero.logError(e); }

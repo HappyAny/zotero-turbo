@@ -47,6 +47,7 @@ var ZotTurboPrefs = (function () {
     "readerOutlineEnabled",
     "pdfjsCleanupEnabled",
     "tabHibernateEnabled",
+    "startupSelectLibraryTab",
     "startupHibernateBackgroundTabs",
     "tabHibernateNotes",
     "autoBackgroundSlimEnabled",
