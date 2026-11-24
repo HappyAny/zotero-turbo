@@ -70,6 +70,30 @@ var ZotTurboTabHibernator = (function () {
       };
     }
 
+    _persistNormalizedSessionIfNeeded() {
+      if (this._destroyed || !this.getPref("startupSelectLibraryTab", true)) return false;
+      try {
+        const session = Zotero.Session;
+        if (!session || typeof session.save !== "function") return false;
+        const windows = session.state?.windows;
+        if (!Array.isArray(windows) || windows.length === 0) return false;
+        const needsNormalize = windows.some((w) => {
+          if (!w || w.type !== "pane" || !Array.isArray(w.tabs)) return false;
+          const hasLibrary = w.tabs.some((t) => t && t.type === "library");
+          if (!hasLibrary) return false;
+          const librarySelected = w.tabs.some((t) => t && t.type === "library" && t.selected === true);
+          const otherSelected = w.tabs.some((t) => t && t.type !== "library" && t.selected);
+          return !librarySelected || otherSelected;
+        });
+        if (!needsNormalize) return false;
+        Promise.resolve(session.save()).catch(() => {});
+        Zotero.debug("[ZotTurbo] Persisted normalized session.json (My Library selected, all tabs preserved)");
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     _ensureStartupLibraryTab(win) {
       if (this._destroyed || this._didStartupLibrarySwitch || this._userInteractedWithTabs) return false;
       if (!this.getPref("startupSelectLibraryTab", true)) return false;
@@ -130,16 +154,20 @@ var ZotTurboTabHibernator = (function () {
       }, 60 * 1000);
 
       // Early startup sweep: switch fallback tab to My Library if old session.json booted on a PDF,
+      // persist normalized session.json immediately when migrating from an older PDF-selected session,
       // then hibernate restored background PDF tabs quickly instead of waiting 60s
       if (this._startupSweepDelayMs > 0) {
         this._startupSweepTimer = setTimeout(() => {
           this._startupSweepTimer = null;
           if (this._destroyed) return;
-          if (this.getPref("startupSelectLibraryTab", true) && !this._didStartupLibrarySwitch) {
-            for (const win of Zotero.getMainWindows()) {
-              if (this._ensureStartupLibraryTab(win)) break;
+          if (this.getPref("startupSelectLibraryTab", true)) {
+            if (!this._didStartupLibrarySwitch) {
+              for (const win of Zotero.getMainWindows()) {
+                if (this._ensureStartupLibraryTab(win)) break;
+              }
+              this._didStartupLibrarySwitch = true;
             }
-            this._didStartupLibrarySwitch = true;
+            this._persistNormalizedSessionIfNeeded();
           }
           if (!this.getPref("tabHibernateEnabled", true)) return;
           if (this.getPref("startupHibernateBackgroundTabs", true)) {

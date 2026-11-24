@@ -40,7 +40,12 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.13.0");
+  assert.equal(manifest.version, "0.13.1");
+  const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
+  assert.ok(
+    bootSrc.indexOf("await Zotero.initializationPromise;") < bootSrc.indexOf("const startupAt = Date.now();"),
+    "startupAt must be captured AFTER await Zotero.initializationPromise so slow init does not eat startup grace windows!"
+  );
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -79,7 +84,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.13.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.13.1 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2339,13 +2344,32 @@ console.log("=== [Check 20] v0.13.0: Startup Select Library Tab While Preserving
       unloadUnusedTabs() {},
     },
   };
+  let sessionSaveCalls = 0;
+  const mockSessionState = {
+    windows: [
+      {
+        type: "pane",
+        tabs: [
+          { type: "library", title: "My Library" },
+          { type: "reader", title: "Paper A", data: { itemID: 9239 }, selected: true },
+        ],
+      },
+    ],
+  };
   const thCtx3 = vm.createContext({
     Zotero: {
       getMainWindows: () => [mockWin3],
       Date: { getUnixTimestamp: () => 2000 },
       Notifier: { registerObserver: () => 1, unregisterObserver() {} },
       Items: { getAsync: async () => null },
-      Session: { setLastClosedZoteroPaneState: origSetLastClosed },
+      Session: {
+        setLastClosedZoteroPaneState: origSetLastClosed,
+        state: mockSessionState,
+        async save() {
+          sessionSaveCalls++;
+          mockSessionState.windows = [mockWin3.ZoteroPane.getState()];
+        },
+      },
       debug() {},
     },
     Services: { obs: { addObserver() {}, removeObserver() {} }, focus: { activeWindow: mockWin3 } },
@@ -2384,17 +2408,19 @@ console.log("=== [Check 20] v0.13.0: Startup Select Library Tab While Preserving
   assert.equal(rawState.tabs[1].selected, true, "When pref is disabled, active PDF tab stays selected");
   startupSelectPref = true;
 
-  // 5. After startup sweep runs, BOTH PDF tabs are hibernated since Library is now active!
+  // 5. After startup sweep runs, BOTH PDF tabs are hibernated AND unnormalized session.json was persisted immediately!
   await new Promise((r) => setTimeout(r, 80));
   assert.deepEqual(unloadedIds3, ["pdf-1", "pdf-2"], "All PDF tabs hibernated once Library is selected at startup");
+  assert.equal(sessionSaveCalls, 1, "Unnormalized PDF-selected session.json must be persisted immediately on first boot");
+  assert.equal(mockSessionState.windows[0].tabs[0].selected, true);
+  assert.equal(mockSessionState.windows[0].tabs[1].selected, undefined);
 
   // 6. Clean restore on normal shutdown (disable/uninstall/upgrade)
   hib3.shutdown();
   assert.equal(mockWin3.ZoteroPane.getState, origGetState, "ZoteroPane.getState restored cleanly");
   assert.equal(thCtx3.Zotero.Session.setLastClosedZoteroPaneState, origSetLastClosed, "Session hook restored cleanly");
 
-  // 7. User-click protection: if Zotero booted cleanly onto Library and user selects a PDF within 4s,
-  //    startup sweep MUST NOT yank them back to My Library!
+  // 7. User-click protection & zero extra disk write when session.json is ALREADY normalized:
   const tabs4 = [
     { id: "zotero-pane", type: "library" },
     { id: "pdf-1", type: "reader-unloaded", timeUnselected: 0, data: { itemID: 9239 } },
@@ -2424,6 +2450,7 @@ console.log("=== [Check 20] v0.13.0: Startup Select Library Tab While Preserving
   tabs4[1].type = "reader";
   await new Promise((r) => setTimeout(r, 70));
   assert.equal(mockWin4.Zotero_Tabs.selectedID, "pdf-1", "User-selected PDF tab after clean Library boot must NOT be hijacked");
+  assert.equal(sessionSaveCalls, 1, "Already-normalized session.json must NOT trigger redundant startup save");
 
   // 8. APP_SHUTDOWN preserves session normalization even if Zotero.Session.save() runs after bootstrap.shutdown()
   hib4.shutdown({ preserveSessionHook: true });

@@ -135,8 +135,8 @@ function uninstall() {}
 
 async function startup({ id, version, rootURI }) {
   try {
-    const startupAt = Date.now();
     await Zotero.initializationPromise;
+    const startupAt = Date.now();
 
     // Register chrome://zoturbo/content/ (src/) & chrome://zoturboui/content/ (content/)
     const aomStartup = Components.classes["@mozilla.org/addons/addon-manager-startup;1"]
