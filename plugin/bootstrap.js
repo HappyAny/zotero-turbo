@@ -4,7 +4,6 @@
 var ZotTurboPlugin = null;
 var ZotTurboChromeHandle = null;
 var ZotTurboPrefPaneID = null;
-var ZotTurboWarmupTimer = null;
 
 const ZOT_TURBO_PREF_PREFIX = "extensions.zotero-turbo.";
 const ZOT_MUPDF_PREF_PREFIX = "extensions.zotero-turbo.mupdf.";
@@ -442,25 +441,14 @@ async function startup({ id, version, rootURI }) {
       }
     }
 
-    // Pure on-demand native engine startup: when no PDF reader tabs are open at
-    // launch, keep 0 ChromeWorkers & 0 native C++ render threads in RAM until
-    // the first PDF opens (readerHook.attachReader wakes MuPDF in ~40-60ms in
-    // parallel with iframe mount) or a search/index invokes nativeClient.
+    // Pure on-demand native engine startup:
+    // - renderEngine warms only if a PDF reader is already open at startup
+    // - nativeClient stays at 0 ChromeWorkers until first actual text/outline/search/index request
     const hasOpenReaders = (Zotero.Reader?._readers?.length || 0) > 0;
-    if (hasOpenReaders) {
-      const { setTimeout: ztSetTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
-      if (renderEngine && renderEngine.isEnabled()) {
-        renderEngine.ensureStarted().catch((err) => {
-          Zotero.debug("[ZotTurbo] MuPDF render engine warm-up notice: " + (err?.message || String(err)));
-        });
-      }
-      ZotTurboWarmupTimer = ztSetTimeout(() => {
-        ZotTurboWarmupTimer = null;
-        if (!ZotTurboPlugin) return;
-        nativeClient.ensureStarted().catch((err) => {
-          Zotero.debug("[ZotTurbo] Native text/scanner warm-up notice: " + (err?.message || String(err)));
-        });
-      }, 3000);
+    if (hasOpenReaders && renderEngine && renderEngine.isEnabled()) {
+      renderEngine.ensureStarted().catch((err) => {
+        Zotero.debug("[ZotTurbo] MuPDF render engine warm-up notice: " + (err?.message || String(err)));
+      });
     }
 
     Zotero.debug(`[ZotTurbo] Plugin v${version} initialized (unified 7-module native acceleration suite, on-demand standby=${!hasOpenReaders})`);
@@ -487,13 +475,6 @@ function onMainWindowUnload({ window }) {
 }
 
 async function shutdown() {
-  if (ZotTurboWarmupTimer) {
-    try {
-      const { clearTimeout: ztClearTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
-      ztClearTimeout(ZotTurboWarmupTimer);
-    } catch {}
-    ZotTurboWarmupTimer = null;
-  }
   if (ZotTurboPrefPaneID) {
     try {
       Zotero.PreferencePanes?.unregister?.(ZotTurboPrefPaneID);

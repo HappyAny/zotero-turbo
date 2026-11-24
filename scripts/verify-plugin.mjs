@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.12.0");
+  assert.equal(manifest.version, "0.12.1");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -78,7 +78,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.12.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.12.1 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2000,7 +2000,7 @@ console.log("=== [Check 17] v0.10.0: Pure On-Demand MuPDF Engine Wake & Auto-Sle
   // 3. Verify bootstrap.js implements pure on-demand standby & EngineClient exposes sleep()
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(bootSrc.includes("standby: !nativeActive && !hasError"), "bootstrap.js must report standby status for Preferences UI");
-  assert.ok(bootSrc.includes("if (hasOpenReaders)"), "bootstrap.js must not spin up workers on library-only startup");
+  assert.ok(bootSrc.includes("if (hasOpenReaders"), "bootstrap.js must not spin up workers on library-only startup");
   const engSrc = fs.readFileSync(path.join(PLUGIN_DIR, "src/engine-client.js"), "utf8");
   assert.ok(engSrc.includes("async sleep()"), "EngineClient must expose sleep() for idle PDF-free reclamation");
 
@@ -2154,13 +2154,13 @@ console.log("=== [Check 18] v0.11.0: Cold-Start Grace Window & Early Startup Tab
   hibernator.shutdown();
   assert.equal(hibernator._startupSweepTimer, null);
 
-  // 4. Verify bootstrap.js wires startupAt, startupSweepDelayMs and staggered 3s nativeClient warmup
+  // 4. Verify bootstrap.js wires startupAt, startupSweepDelayMs and pure on-demand nativeClient (no eager warmup timer)
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(bootSrc.includes("startupGraceSec: 45"), "bootstrap.js must define startupGraceSec default");
   assert.ok(bootSrc.includes("startupProcessedDataDelayMs: 12000"), "bootstrap.js must define startupProcessedDataDelayMs default");
   assert.ok(bootSrc.includes("startupSweepDelayMs: 4000"), "bootstrap.js must enable early 4s startup tab sweep");
   assert.ok(bootSrc.includes("startupHibernateBackgroundTabs: true"), "bootstrap.js must enable startupHibernateBackgroundTabs by default");
-  assert.ok(bootSrc.includes("}, 3000);"), "bootstrap.js must stagger non-urgent nativeClient warmup to 3s");
+  assert.ok(!bootSrc.includes("ZotTurboWarmupTimer"), "bootstrap.js must keep nativeClient purely on-demand with no eager startup warmup timer");
 
   console.log("  PASS: Cold-start 45s grace window, aborted hibernated scan, and early startup tab hibernation verified");
 }
