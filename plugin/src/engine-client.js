@@ -870,6 +870,78 @@ var ZotMuPDFEngineClient = (function () {
       this._emitStats();
     }
 
+    async sleep() {
+      if (this.stopped || !this.ready) return false;
+      if (this._inFlightMain > 0 || this.queue.length > 0) return false;
+      if (this._sleepPromise) return this._sleepPromise;
+      this._sleepPromise = (async () => {
+        try {
+          if (this.stopped || !this.ready || this._inFlightMain > 0 || this.queue.length > 0) {
+            return false;
+          }
+          this.ready = false;
+          this.stats.busy = false;
+          if (this._busyTimer) {
+            clearTimeout(this._busyTimer);
+            this._busyTimer = null;
+          }
+          this._clearIdleTrim();
+          if (this._memPressureObserver && typeof Services !== "undefined" && Services.obs?.removeObserver) {
+            try {
+              Services.obs.removeObserver(this._memPressureObserver, "memory-pressure");
+            } catch {}
+            this._memPressureObserver = null;
+          }
+          const workers = this.workers.splice(0);
+          this.workerCount = 0;
+          this.bgWorkerCount = 0;
+          await Promise.all(
+            workers.map(
+              slot =>
+                new Promise(resolve => {
+                  const t = setTimeout(() => {
+                    try {
+                      slot.worker.terminate();
+                    } catch {}
+                    resolve();
+                  }, 800);
+                  slot.worker.onmessage = ev => {
+                    if (ev.data?.cmd === "shutdown") {
+                      clearTimeout(t);
+                      try {
+                        slot.worker.terminate();
+                      } catch {}
+                      resolve();
+                    }
+                  };
+                  try {
+                    slot.worker.postMessage({ cmd: "shutdown", id: 0 });
+                  } catch {
+                    clearTimeout(t);
+                    resolve();
+                  }
+                })
+            )
+          );
+          try {
+            if (this.ctrlEng && this.fnCtrlRelease) {
+              this.fnCtrlRelease(this.ctrlEng);
+              this.ctrlEng = null;
+            }
+            if (this.ctrlLib) {
+              this.ctrlLib.close();
+              this.ctrlLib = null;
+            }
+          } catch {}
+          this._emitStats(true);
+          return true;
+        } finally {
+          this._sleepPromise = null;
+        }
+      })();
+      return this._sleepPromise;
+    }
+
     async restart() {
       this.startPromise = null;
       await this.shutdown();

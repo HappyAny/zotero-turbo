@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.9.0");
+  assert.equal(manifest.version, "0.10.0");
   assert.ok(
     typeof manifest.applications.zotero.update_url === "string" &&
       manifest.applications.zotero.update_url.startsWith("https://"),
@@ -77,7 +77,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.9.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.10.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -1885,4 +1885,125 @@ console.log("=== [Check 16] v0.9.0: Reader Text ASCII/Diacritic Fast-Path & Elas
   console.log("  PASS: Reader text ASCII/diacritic fast-path & elastic 1->3->1 NativeClient worker pool verified");
 }
 
-console.log("\n[ALL 16 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 17] v0.10.0: Pure On-Demand MuPDF Engine Wake & Auto-Sleep (0 Workers in Library-Only Mode) ===");
+{
+  // 1. ReaderHook wakes renderEngine on attachReader() and auto-sleeps it after all PDF tabs close
+  let engineStartCalls = 0;
+  let engineSleepCalls = 0;
+  let engineReady = false;
+  const mockEngine = {
+    onStatsChange: () => () => {},
+    isEnabled: () => true,
+    isReady: () => engineReady,
+    async ensureStarted() {
+      engineStartCalls++;
+      engineReady = true;
+    },
+    async sleep() {
+      engineSleepCalls++;
+      engineReady = false;
+      return true;
+    },
+    evictPath() {},
+    getSummary: () => ({ enabled: true, ready: engineReady, totalRenders: 0, fgWorkers: engineReady ? 2 : 0, workers: engineReady ? 3 : 0 }),
+  };
+  const rhCtx3 = vm.createContext({
+    Zotero: {
+      Reader: { _readers: [] },
+      Items: { getAsync: async () => ({ getFilePathAsync: async () => "C:\\papers\\demo.pdf" }) },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      File: { getResourceAsync: async () => "" },
+      debug() {},
+      logError() {},
+    },
+    Services: { wm: { getMostRecentWindow: () => null } },
+    Components: { utils: { cloneInto: (x) => x, exportFunction: (f) => f, unwaiveXrays: (x) => x } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+  });
+  loadScriptInContext("src/reader-hook.js", rhCtx3);
+  const rh3 = new rhCtx3.ZotMuPDFReaderHook.ReaderHook({
+    pluginID: "zt",
+    rootURI: "file:///",
+    engineClient: mockEngine,
+    renderIdleSleepMs: 60,
+  });
+  assert.equal(engineStartCalls, 0, "Engine must remain in 0-worker standby before any PDF opens");
+  const fakeReader = { tabID: "tab-pdf-1", type: "pdf", itemID: 1, _isUninitialized: false, _isTabClosed: false };
+  rh3.attachReader(fakeReader);
+  assert.equal(engineStartCalls, 1, "attachReader() must wake MuPDF renderEngine on-demand");
+  assert.equal(engineReady, true);
+  // Closing the last PDF tab schedules engine.sleep()
+  rh3._detachReader("tab-pdf-1");
+  await new Promise((r) => setTimeout(r, 110));
+  assert.equal(engineSleepCalls, 1, "Closing all PDF tabs must auto-sleep renderEngine after idle timeout");
+  assert.equal(engineReady, false);
+  // Opening a new PDF wakes it back up cleanly
+  rh3.attachReader({ tabID: "tab-pdf-2", type: "pdf", itemID: 2, _isUninitialized: false, _isTabClosed: false });
+  assert.equal(engineStartCalls, 2, "Re-opening a PDF after sleep must wake renderEngine cleanly");
+  rh3.shutdown();
+
+  // 2. NativeClient 1->0 idle sleep & transparent wake on next request
+  let spawned = 0;
+  let terminated = 0;
+  class MockWorkerSleep {
+    constructor() {
+      spawned++;
+      this.onmessage = null;
+    }
+    postMessage(msg) {
+      setTimeout(() => {
+        if (!this.onmessage) return;
+        if (msg.op === "init") this.onmessage({ data: { id: msg.id, ok: true, result: { version: "0.10.0" } } });
+        else if (msg.op === "shutdown") this.onmessage({ data: { id: msg.id, ok: true, result: true } });
+        else this.onmessage({ data: { id: msg.id, ok: true, result: { ok: true } } });
+      }, 4);
+    }
+    terminate() {
+      terminated++;
+      this.onmessage = null;
+    }
+  }
+  const ncCtx2 = vm.createContext({
+    Zotero: { Profile: { dir: "C:\\mock" }, debug() {} },
+    Services: { appinfo: { OS: "WINNT", XPCOMABI: "x86_64-msvc" }, prefs: {} },
+    Components: {},
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }) },
+    ChromeWorker: MockWorkerSleep,
+    IOUtils: { makeDirectory: async () => {}, stat: async () => ({ size: 2000000 }) },
+    PathUtils: { profileDir: "C:\\mock", join: (...parts) => parts.join("\\") },
+  });
+  loadScriptInContext("src/native-client.js", ncCtx2);
+  const nc2 = new ncCtx2.ZotTurboNativeClient.NativeClient({
+    rootURI: "file:///mock/",
+    version: "0.10.0",
+    minWorkers: 1,
+    maxWorkers: 3,
+    burstReapMs: 50,
+    idleSleepMs: 70,
+  });
+  assert.equal(nc2.slots.length, 0, "NativeClient starts with 0 workers until first call");
+  await nc2.extractPageData("demo.pdf", 0);
+  assert.equal(nc2.slots.length, 1);
+  assert.equal(nc2.available, true);
+  await new Promise((r) => setTimeout(r, 130));
+  assert.equal(nc2.slots.length, 0, "Idle NativeClient must auto-sleep last baseline worker down to 0");
+  assert.equal(nc2.available, false);
+  assert.equal(terminated, 1);
+  // Subsequent request transparently wakes worker #2
+  const res = await nc2.extractPageData("demo.pdf", 1);
+  assert.equal(res.ok, true);
+  assert.equal(nc2.slots.length, 1);
+  assert.equal(spawned, 2);
+  await nc2.shutdown();
+
+  // 3. Verify bootstrap.js implements pure on-demand standby & EngineClient exposes sleep()
+  const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
+  assert.ok(bootSrc.includes("standby: !nativeActive && !hasError"), "bootstrap.js must report standby status for Preferences UI");
+  assert.ok(bootSrc.includes("if (hasOpenReaders)"), "bootstrap.js must not spin up workers on library-only startup");
+  const engSrc = fs.readFileSync(path.join(PLUGIN_DIR, "src/engine-client.js"), "utf8");
+  assert.ok(engSrc.includes("async sleep()"), "EngineClient must expose sleep() for idle PDF-free reclamation");
+
+  console.log("  PASS: On-demand MuPDF wake, PDF-free auto-sleep, and 0-worker NativeClient standby verified");
+}
+
+console.log("\n[ALL 17 VERIFICATION SUITES PASSED]");

@@ -15,10 +15,12 @@ var ZotMuPDFReaderHook = (function () {
   }
 
   class ReaderHook {
-    constructor({ pluginID, rootURI, engineClient }) {
+    constructor({ pluginID, rootURI, engineClient, renderIdleSleepMs = 300000 }) {
       this.pluginID = pluginID;
       this.rootURI = rootURI;
       this.engine = engineClient;
+      this.renderIdleSleepMs = Math.max(0, Number(renderIdleSleepMs) || 0);
+      this._renderSleepTimer = null;
       this.pagePatchSource = "";
       this.readerStates = new Map(); // stableReaderKey -> state
       this.viewerEntries = new Set(); // { viewerWin, rawWin, viewerKey, onUnload }
@@ -203,8 +205,34 @@ var ZotMuPDFReaderHook = (function () {
       th.iframeWin = null;
     }
 
+    _clearRenderSleepTimer() {
+      if (this._renderSleepTimer) {
+        clearTimeout(this._renderSleepTimer);
+        this._renderSleepTimer = null;
+      }
+    }
+
+    _scheduleRenderSleep() {
+      this._clearRenderSleepTimer();
+      if (this._destroyed || this.renderIdleSleepMs <= 0 || this.readerStates.size > 0) return;
+      if (typeof this.engine?.sleep !== "function") return;
+      this._renderSleepTimer = setTimeout(() => {
+        this._renderSleepTimer = null;
+        if (this._destroyed || this.readerStates.size > 0) return;
+        if (this.engine?.isReady?.()) {
+          this.engine.sleep().catch(() => {});
+        }
+      }, this.renderIdleSleepMs);
+    }
+
     attachReader(reader) {
       if (this._destroyed || !reader || reader.type !== "pdf") return;
+      this._clearRenderSleepTimer();
+      // Wake MuPDF render engine on-demand the moment a PDF reader opens so
+      // initialization (~40-60ms) overlaps invisibly with viewer iframe mount.
+      if (this.engine?.isEnabled?.() && !this.engine.isReady?.() && typeof this.engine.ensureStarted === "function") {
+        this.engine.ensureStarted().catch(() => {});
+      }
       const key = this._getReaderKey(reader);
       if (this.readerStates.has(key)) {
         const existing = this.readerStates.get(key);
@@ -257,11 +285,11 @@ var ZotMuPDFReaderHook = (function () {
 
     async _waitForReaderIframe(state) {
       let tries = 0;
-      while (!this._destroyed && !state.reader._isUninitialized && !state.reader._iframeWindow && tries < 200) {
+      while (!this._destroyed && state.reader && !state.reader._isUninitialized && !state.reader._iframeWindow && tries < 200) {
         await new Promise(r => setTimeout(r, 25));
         tries++;
       }
-      if (this._destroyed || state.reader._isUninitialized || !state.reader._iframeWindow) {
+      if (this._destroyed || !state.reader || state.reader._isUninitialized || !state.reader._iframeWindow) {
         return;
       }
 
@@ -997,6 +1025,10 @@ var ZotMuPDFReaderHook = (function () {
           } catch {}
         }
       }
+
+      if (!this._destroyed && this.readerStates.size === 0) {
+        this._scheduleRenderSleep();
+      }
     }
 
     refreshAllViewers(coldReset = false) {
@@ -1592,6 +1624,7 @@ var ZotMuPDFReaderHook = (function () {
 
     shutdown() {
       this._destroyed = true;
+      this._clearRenderSleepTimer();
 
       if (this._unsubStats) {
         this._unsubStats();

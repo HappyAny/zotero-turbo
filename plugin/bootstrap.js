@@ -244,12 +244,16 @@ async function startup({ id, version, rootURI }) {
           : standaloneMuPDFDetected && Zotero.ZotMuPDF?.engineClient?.getSummary
             ? Zotero.ZotMuPDF.engineClient.getSummary()
             : null;
+        const nativeActive = nativeClient.available || !!renderEngine?.mupdfVersion;
+        const hasError = !!(nativeClient.initError || renderEngine?.lastError);
+        const fallbackPlatform = globalThis.ZotTurboNativeClient?.getNativeBinarySpec?.()?.platformKey || "";
         return {
           version,
           standaloneMuPDFDetected,
-          nativeAvailable: nativeClient.available || !!renderEngine?.mupdfVersion,
+          nativeAvailable: nativeActive,
+          standby: !nativeActive && !hasError,
           nativeVersion: nativeClient.nativeVersion || renderEngine?.mupdfVersion || "",
-          platformKey: nativeClient.platformKey || "",
+          platformKey: nativeClient.platformKey || fallbackPlatform,
           initError: nativeClient.initError,
           render: renderSummary,
           pdfText: pdfTextAccel.getStats(),
@@ -432,30 +436,28 @@ async function startup({ id, version, rootURI }) {
       }
     }
 
-    // Defer worker warm-up briefly so ChromeWorker spin-up does not contend with
-    // Zotero DB / Better BibTeX / plugin initialization at launch. Any earlier
-    // PDF open or search still invokes ensureStarted() immediately on demand.
-    const { setTimeout: ztSetTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+    // Pure on-demand native engine startup: when no PDF reader tabs are open at
+    // launch, keep 0 ChromeWorkers & 0 native C++ render threads in RAM until
+    // the first PDF opens (readerHook.attachReader wakes MuPDF in ~40-60ms in
+    // parallel with iframe mount) or a search/index invokes nativeClient.
     const hasOpenReaders = (Zotero.Reader?._readers?.length || 0) > 0;
-    if (hasOpenReaders && renderEngine && renderEngine.isEnabled()) {
-      renderEngine.ensureStarted().catch((err) => {
-        Zotero.debug("[ZotTurbo] MuPDF render engine warm-up notice: " + (err?.message || String(err)));
-      });
-    }
-    ZotTurboWarmupTimer = ztSetTimeout(() => {
-      ZotTurboWarmupTimer = null;
-      if (!ZotTurboPlugin) return;
-      nativeClient.ensureStarted().catch((err) => {
-        Zotero.debug("[ZotTurbo] Native text/scanner warm-up notice: " + (err?.message || String(err)));
-      });
-      if (!hasOpenReaders && renderEngine && renderEngine.isEnabled()) {
+    if (hasOpenReaders) {
+      const { setTimeout: ztSetTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+      if (renderEngine && renderEngine.isEnabled()) {
         renderEngine.ensureStarted().catch((err) => {
           Zotero.debug("[ZotTurbo] MuPDF render engine warm-up notice: " + (err?.message || String(err)));
         });
       }
-    }, hasOpenReaders ? 800 : 2500);
+      ZotTurboWarmupTimer = ztSetTimeout(() => {
+        ZotTurboWarmupTimer = null;
+        if (!ZotTurboPlugin) return;
+        nativeClient.ensureStarted().catch((err) => {
+          Zotero.debug("[ZotTurbo] Native text/scanner warm-up notice: " + (err?.message || String(err)));
+        });
+      }, 800);
+    }
 
-    Zotero.debug(`[ZotTurbo] Plugin v${version} initialized (unified 7-module native acceleration suite)`);
+    Zotero.debug(`[ZotTurbo] Plugin v${version} initialized (unified 7-module native acceleration suite, on-demand standby=${!hasOpenReaders})`);
   } catch (err) {
     Zotero.logError("[ZotTurbo] startup failed:");
     Zotero.logError(err);

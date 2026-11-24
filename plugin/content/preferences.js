@@ -134,6 +134,9 @@ var ZotTurboPrefs = (function () {
       if (s.nativeAvailable) {
         badge.textContent = `v${s.version} · 单 DLL 原生 MuPDF ${s.render?.mupdfVersion || "1.28.0"} 就绪 (${s.platformKey || "native"})`;
         badge.className = "zt-badge zt-badge-ok";
+      } else if (s.standby) {
+        badge.textContent = `v${s.version} · 单 DLL 原生 MuPDF 按需待机 (${s.platformKey || "native"})`;
+        badge.className = "zt-badge zt-badge-ok";
       } else {
         badge.textContent = `v${s.version} · 兼容模式`;
         badge.className = "zt-badge zt-badge-warn";
@@ -159,8 +162,12 @@ var ZotTurboPrefs = (function () {
         const hitRate = mainN > 0 ? Math.round(((r.pixHits || 0) + (r.dlHits || 0)) * 100 / mainN) : 0;
         const fgW = Number(r.fgWorkers || 0);
         const bgW = Math.max(0, Number(r.workers || 0) - fgW);
-        const stateLabel = r.ready ? "已就绪" : "待命";
-        elRender.textContent = `${stateLabel} · 累计渲染 ${total} 帧 (主页 ${mainN} / 缩略图 ${thumbN}) · 均耗 ${avg} ms · 缓存命中 ${hitRate}% · 线程 ${fgW}+${bgW}`;
+        if (!r.ready && total === 0) {
+          elRender.textContent = "按需待机（打开 PDF 时秒启，纯文献库零常驻内存）";
+        } else {
+          const stateLabel = r.ready ? "已就绪" : "已自动休眠";
+          elRender.textContent = `${stateLabel} · 累计渲染 ${total} 帧 (主页 ${mainN} / 缩略图 ${thumbN}) · 均耗 ${avg} ms · 缓存命中 ${hitRate}% · 线程 ${fgW}+${bgW}`;
+        }
       }
     }
 

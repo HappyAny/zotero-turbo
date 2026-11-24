@@ -10,6 +10,7 @@ var ZotTurboNativeClient = (function () {
   const DEFAULT_MIN_WORKERS = 1;
   const DEFAULT_MAX_WORKERS = 3;
   const DEFAULT_BURST_REAP_MS = 60000;
+  const DEFAULT_IDLE_SLEEP_MS = 300000;
   const WORKER_STORE_MB = 32;
 
   function getNativeBinarySpec() {
@@ -124,12 +125,13 @@ var ZotTurboNativeClient = (function () {
   }
 
   class NativeClient {
-    constructor({ rootURI, version, minWorkers = DEFAULT_MIN_WORKERS, maxWorkers = DEFAULT_MAX_WORKERS, burstReapMs = DEFAULT_BURST_REAP_MS }) {
+    constructor({ rootURI, version, minWorkers = DEFAULT_MIN_WORKERS, maxWorkers = DEFAULT_MAX_WORKERS, burstReapMs = DEFAULT_BURST_REAP_MS, idleSleepMs = DEFAULT_IDLE_SLEEP_MS }) {
       this.rootURI = rootURI;
       this.version = version;
       this.minWorkers = Math.max(1, minWorkers);
       this.maxWorkers = Math.max(this.minWorkers, maxWorkers);
       this.burstReapMs = Math.max(50, burstReapMs);
+      this.idleSleepMs = Math.max(0, Number(idleSleepMs) || 0);
       this.slots = [];
       this.dllPath = null;
       this.nativeVersion = null;
@@ -141,6 +143,7 @@ var ZotTurboNativeClient = (function () {
       this._spawningBurst = false;
       this._idleTimer = null;
       this._reapTimer = null;
+      this._sleepTimer = null;
       this._destroyed = false;
       this._nextSlotIndex = 0;
       this._rr = 0;
@@ -387,6 +390,43 @@ var ZotTurboNativeClient = (function () {
         this._idleTimer = null;
         this.trim(false).catch(() => {});
       }, IDLE_TRIM_MS);
+      this._touchIdleSleep();
+    }
+
+    _touchIdleSleep() {
+      if (this._sleepTimer) {
+        clearTimeout(this._sleepTimer);
+        this._sleepTimer = null;
+      }
+      if (this._destroyed || this.idleSleepMs <= 0) return;
+      this._sleepTimer = setTimeout(() => {
+        this._sleepTimer = null;
+        this.sleepIdle().catch(() => {});
+      }, this.idleSleepMs);
+    }
+
+    async sleepIdle() {
+      if (this._destroyed || !this.available || this.slots.length === 0) return false;
+      if (this.slots.some((s) => s.inFlight > 0 || s.pending.size > 0)) {
+        this._touchIdleSleep();
+        return false;
+      }
+      if (this._idleTimer) {
+        clearTimeout(this._idleTimer);
+        this._idleTimer = null;
+      }
+      if (this._reapTimer) {
+        clearTimeout(this._reapTimer);
+        this._reapTimer = null;
+      }
+      if (this._sleepTimer) {
+        clearTimeout(this._sleepTimer);
+        this._sleepTimer = null;
+      }
+      const list = this.slots.splice(0);
+      this.available = false;
+      await Promise.all(list.map((s) => s.shutdown().catch(() => {})));
+      return true;
     }
 
     async extractFulltext(path, maxPages = 0) {
@@ -441,6 +481,7 @@ var ZotTurboNativeClient = (function () {
       if (!slot) return { ok: false, errCode: -10 };
       const flags = (caseSensitive ? 1 : 0) | (normalizeWhitespace ? 2 : 0);
       const pathsBlob = paths.join("\n");
+      this._touchIdleSleep();
       return slot.call("scanFiles", { pathsBlob, needle, flags, maxBytes, threads });
     }
 
@@ -480,6 +521,10 @@ var ZotTurboNativeClient = (function () {
       if (this._reapTimer) {
         clearTimeout(this._reapTimer);
         this._reapTimer = null;
+      }
+      if (this._sleepTimer) {
+        clearTimeout(this._sleepTimer);
+        this._sleepTimer = null;
       }
       const list = this.slots.splice(0);
       await Promise.all(list.map((s) => s.shutdown().catch(() => {})));

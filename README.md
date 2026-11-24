@@ -1,13 +1,13 @@
 # Zotero Turbo
 
-**Zotero 一体化原生性能加速套件（v0.9.0）**（适用于 Zotero 7–10）——以**单个统一的 MuPDF 1.28.0 原生 C 动态库**，集成完整 `zotero-mupdf-engine` 渲染引擎与全部 6 大周边性能加速器。
+**Zotero 一体化原生性能加速套件（v0.10.0）**（适用于 Zotero 7–10）——以**单个统一的 MuPDF 1.28.0 原生 C 动态库**，集成完整 `zotero-mupdf-engine` 渲染引擎与全部 6 大周边性能加速器。
 
 ## 7 大核心模块（单 DLL 统一驱动，均支持在设置面板独立开关）
 
-1. **⚡ MuPDF 1.28.0 原生 PDF 渲染引擎**（原 `zotero-mupdf-engine` 完整合入）
-   - 进程内无锁多线程 `ChromeWorker + js-ctypes` 光栅化（页面 + 侧栏缩略图离主线程 `OffscreenCanvas.convertToBlob` 异步编码），全 DLL 统一 `FZ_LOCK_FREETYPE` 线程锁，保留 100% 原生高亮、批注、选字、护眼/暗色主题与第三方插件兼容。
+1. **⚡ MuPDF 1.28.0 原生 PDF 渲染引擎**（原 `zotero-mupdf-engine` 完整合入，**纯文献库 0 常驻按需秒启 + 关完自动休眠**）
+   - 进程内无锁多线程 `ChromeWorker + js-ctypes` 光栅化（页面 + 侧栏缩略图离主线程 `OffscreenCanvas.convertToBlob` 异步编码），全 DLL 统一 `FZ_LOCK_FREETYPE` 线程锁，保留 100% 原生高亮、批注、选字、护眼/暗色主题与第三方插件兼容；未打开 PDF 时零常驻 Worker，首次打开 PDF 瞬间并行拉起，关闭全部 PDF 静置 5 分钟自动休眠释放内存。
    - 256 项 L1 查表暗色/护眼 LUT、Skia 软件画布 120Hz 自适应 `rAF` 6 段离屏分帧绘制、方向感知最低优先级后台预渲染、可选高分屏 DPR 上限（`maxOutputScale`）、阅读器工具栏状态胶囊（脏检查免冗余 DOM 写入、左键切换引擎、**右键一键深度释放内存/休眠后台标签/直达设置**）、支持无需重启 Zotero 的热重载与一键释放缓存。
-2. **📄 PDF 全文、拖入识别、批注检测、Ctrl+F 搜索、大纲 & Worker 内存治理**（共用同一 MuPDF DLL，**弹性 1→3 Worker 池（空闲 60s 自动回收）+ 启动错峰预热** + 零循环 C++ 字符串解码）
+2. **📄 PDF 全文、拖入识别、批注检测、Ctrl+F 搜索、大纲 & Worker 内存治理**（共用同一 MuPDF DLL，**弹性 0↔1↔3 按需 Worker 池（突发空闲 60s 回收、全静置 5min 休眠至 0）** + 零循环 C++ 字符串解码）
    - **原生全文提取**：替换 `Zotero.PDFWorker.getFullText`，单篇/重建索引提速 **9–30×**。
    - **批量建索引并发流水线**：拦截 `Zotero.Fulltext.indexItems`，3 路原生 MuPDF 滑动窗口提前预取，批量导入/重建整库索引再快 **2–3×**。
    - **拖入 PDF 元数据识别 & 嵌入式批注秒测**：原生接管 `Zotero.PDFWorker.getRecognizerData` 与 `Zotero.PDFWorker.hasAnnotations`（`< 0.5 ms`）。
