@@ -23,8 +23,6 @@ var ZotTurboTabHibernator = (function () {
       this.onBackgroundSlim = onBackgroundSlim;
       this._startupAt = Number(startupAt) || Date.now();
       this._startupSweepDelayMs = Math.max(0, Number(startupSweepDelayMs) || 0);
-      this._didStartupLibrarySwitch = false;
-      this._userInteractedWithTabs = false;
       this._preserveSessionHookOnShutdown = false;
       this._origSetLastClosed = null;
       this._wrappedSetLastClosed = null;
@@ -94,32 +92,6 @@ var ZotTurboTabHibernator = (function () {
       }
     }
 
-    _ensureStartupLibraryTab(win) {
-      if (this._destroyed || this._didStartupLibrarySwitch || this._userInteractedWithTabs) return false;
-      if (!this.getPref("startupSelectLibraryTab", true)) return false;
-      if (Date.now() - this._startupAt > 20 * 1000) return false;
-      const zTabs = win?.Zotero_Tabs;
-      if (!zTabs || typeof zTabs.select !== "function" || !Array.isArray(zTabs._tabs)) return false;
-      if (!zTabs._tabs.some((t) => t && t.id === "zotero-pane")) return false;
-      if (!zTabs.selectedID || zTabs.selectedID === "zotero-pane") {
-        // Restored tabs already present with My Library active -> session.json booted cleanly;
-        // do not interfere if the user opens a PDF tab right after launch.
-        if (zTabs._tabs.length > 1) {
-          this._didStartupLibrarySwitch = true;
-        }
-        return false;
-      }
-      try {
-        zTabs.select("zotero-pane");
-        this._didStartupLibrarySwitch = true;
-        Zotero.debug("[ZotTurbo] Startup fallback: switched active tab to My Library (all tabs preserved)");
-        return true;
-      } catch (err) {
-        Zotero.debug("[ZotTurbo] startupSelectLibraryTab switch error: " + (err?.message || String(err)));
-        return false;
-      }
-    }
-
     init() {
       // Hook Zotero.Session.setLastClosedZoteroPaneState so closing the last window preserves
       // all open tabs while marking My Library selected for the next launch.
@@ -153,25 +125,23 @@ var ZotTurboTabHibernator = (function () {
         this._checkBackgroundAutoSlim();
       }, 60 * 1000);
 
-      // Early startup sweep: switch fallback tab to My Library if old session.json booted on a PDF,
-      // persist normalized session.json immediately when migrating from an older PDF-selected session,
-      // then hibernate restored background PDF tabs quickly instead of waiting 60s
+      // Early startup sweep: silently persist normalized session.json on first migration
+      // (never hijack the user's active tab after launch!), then hibernate stale background
+      // restored PDF tabs while sparing any tabs the user already clicked during startup.
       if (this._startupSweepDelayMs > 0) {
         this._startupSweepTimer = setTimeout(() => {
           this._startupSweepTimer = null;
           if (this._destroyed) return;
           if (this.getPref("startupSelectLibraryTab", true)) {
-            if (!this._didStartupLibrarySwitch) {
-              for (const win of Zotero.getMainWindows()) {
-                if (this._ensureStartupLibraryTab(win)) break;
-              }
-              this._didStartupLibrarySwitch = true;
-            }
             this._persistNormalizedSessionIfNeeded();
           }
           if (!this.getPref("tabHibernateEnabled", true)) return;
           if (this.getPref("startupHibernateBackgroundTabs", true)) {
-            this.hibernateAllBackground({ includeNotes: false, reason: "startup-restore" });
+            this.hibernateAllBackground({
+              includeNotes: false,
+              reason: "startup-restore",
+              skipRecentlySelectedSec: 120,
+            });
           } else {
             this.sweepAllWindows({ reason: "startup-restore" });
           }
@@ -276,32 +246,6 @@ var ZotTurboTabHibernator = (function () {
         };
         state.wrappedPaneGetState = wrappedGetState;
         pane.getState = wrappedGetState;
-      }
-
-      // Fallback on first launch after enabling: if old session.json booted into a PDF tab, switch to Library.
-      // If tabs are still restoring, also track user pointer/key input so we never override a user click.
-      this._ensureStartupLibraryTab(win);
-      if (
-        !this._didStartupLibrarySwitch &&
-        Date.now() - this._startupAt <= 20 * 1000 &&
-        doc &&
-        typeof doc.addEventListener === "function"
-      ) {
-        const markUserInteraction = () => {
-          this._userInteractedWithTabs = true;
-          try {
-            doc.removeEventListener("pointerdown", markUserInteraction, true);
-            doc.removeEventListener("keydown", markUserInteraction, true);
-          } catch {}
-        };
-        doc.addEventListener("pointerdown", markUserInteraction, { capture: true, passive: true });
-        doc.addEventListener("keydown", markUserInteraction, { capture: true, passive: true });
-        state.cleanups.push(() => {
-          try {
-            doc.removeEventListener("pointerdown", markUserInteraction, true);
-            doc.removeEventListener("keydown", markUserInteraction, true);
-          } catch {}
-        });
       }
 
       // Hook tab-bar right-click menu via passive contextmenu + popupshowing on popupset
@@ -582,8 +526,9 @@ var ZotTurboTabHibernator = (function () {
       return count;
     }
 
-    hibernateAllBackground({ includeNotes = false } = {}) {
+    hibernateAllBackground({ includeNotes = false, skipRecentlySelectedSec = 0 } = {}) {
       let total = 0;
+      const nowSec = skipRecentlySelectedSec > 0 ? Zotero.Date.getUnixTimestamp() : 0;
       for (const win of Zotero.getMainWindows()) {
         const zTabs = win?.Zotero_Tabs;
         if (!zTabs) continue;
@@ -591,6 +536,7 @@ var ZotTurboTabHibernator = (function () {
           (t) =>
             t.id !== zTabs.selectedID &&
             (t.type === "reader" || (includeNotes && t.type === "note")) &&
+            !(skipRecentlySelectedSec > 0 && t.timeSelected && nowSec - t.timeSelected < skipRecentlySelectedSec) &&
             zTabs.canUnload(t.id)
         );
         for (const tab of targets) {
