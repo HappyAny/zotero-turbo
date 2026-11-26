@@ -66,7 +66,7 @@ const ZOT_MUPDF_DEFAULTS = {
   prerender: true,
   softwareCanvas: true,
   maxOutputScale: "",
-  maxPageMegapixels: "4.5",
+  maxPageMegapixels: "adaptive",
   liteOverlayBlend: true,
   longDocCssOpt: true,
   deferTextLayerOnScroll: true,

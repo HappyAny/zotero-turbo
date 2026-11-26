@@ -40,20 +40,42 @@
   let docLoadedListener = null;
   let pageRenderedListener = null;
   let textLayerRenderedListener = null;
+  let scaleChangeListener = null;
+  let pageChangeListener = null;
   let attachRetryTimer = null;
   let attachRetryTries = 0;
 
-  // 4K 120Hz & long-document runtime optimizations (CSS isolation, blend-free scroll, scroll-settled textLayer)
+  // 4K 120Hz & long-document runtime optimizations (CSS isolation, blend-free scroll, scroll-settled textLayer,
+  // and Adaptive HiDPI: 3.6 MP fast tier for off-screen/scrolling pages -> unlimited native atomic swap on settle)
   const OPT_STYLE_ID = "zot-turbo-4k-style";
   const SCROLL_CLASS = "zot-turbo-scrolling";
   const SCROLL_SETTLE_MS = 140;
+  const ADAPTIVE_DEFAULT_FAST_MP = 3.6;
+  const ADAPTIVE_DEMOTE_DELAY_MS = 600;
   let scrollContainer = null;
   let scrollListener = null;
   let scrollIdleTimer = null;
+  let adaptiveDemoteTimer = null;
   let isScrolling = false;
   let scrollSettleWaiters = [];
+  const activeAdaptiveUpgrades = new Map(); // pageNumber -> { reqId, cancelled }
 
   const pageRenderEndTimes = new Map(); // pageNumber -> performance.now()
+
+  function cancelAllAdaptiveUpgrades() {
+    if (adaptiveDemoteTimer) {
+      clearTimeout(adaptiveDemoteTimer);
+      adaptiveDemoteTimer = null;
+    }
+    if (activeAdaptiveUpgrades.size === 0) return;
+    for (const entry of activeAdaptiveUpgrades.values()) {
+      entry.cancelled = true;
+      try {
+        bridge.cancelRequest(entry.reqId);
+      } catch {}
+    }
+    activeAdaptiveUpgrades.clear();
+  }
 
   function flushScrollWaiters() {
     if (scrollSettleWaiters.length === 0) return;
@@ -124,6 +146,7 @@
       }
       scrollContainer = container;
       scrollListener = () => {
+        cancelAllAdaptiveUpgrades();
         if (!isScrolling) {
           isScrolling = true;
           try {
@@ -143,6 +166,8 @@
             scrollContainer?.classList?.remove(SCROLL_CLASS);
           } catch {}
           flushScrollWaiters();
+          upgradeVisibleAdaptivePages();
+          scheduleOffscreenAdaptiveDemote();
         }, SCROLL_SETTLE_MS);
       };
       scrollContainer.addEventListener("scroll", scrollListener, { passive: true });
@@ -292,6 +317,273 @@
     return true;
   }
 
+  function getVisiblePageViews() {
+    const pv = window.PDFViewerApplication?.pdfViewer;
+    if (!pv) return [];
+    const out = [];
+    const seen = new Set();
+    try {
+      if (typeof pv._getVisiblePages === "function") {
+        const vis = pv._getVisiblePages();
+        if (vis && Array.isArray(vis.views) && vis.views.length > 0) {
+          for (const item of vis.views) {
+            const view = item?.view || item;
+            if (view && view.id != null && !seen.has(view.id)) {
+              seen.add(view.id);
+              out.push(view);
+            }
+          }
+        } else if (vis && vis.ids && vis.ids.size > 0 && Array.isArray(pv._pages)) {
+          for (const pageView of pv._pages) {
+            if (pageView && vis.ids.has(pageView.id) && !seen.has(pageView.id)) {
+              seen.add(pageView.id);
+              out.push(pageView);
+            }
+          }
+        }
+      }
+    } catch {}
+    if (out.length === 0 && Array.isArray(pv._pages)) {
+      for (let i = 0; i < pv._pages.length; i++) {
+        const pageView = pv._pages[i];
+        if (pageView && isPageVisibleInViewer(pageView.id, i)) {
+          out.push(pageView);
+        }
+      }
+    }
+    const curPage = pv.currentPageNumber | 0;
+    if (curPage > 0 && out.length > 1) {
+      out.sort((a, b) => Math.abs((a.id | 0) - curPage) - Math.abs((b.id | 0) - curPage));
+    }
+    return out;
+  }
+
+  function atomicSwapPageCanvas(pv, oldCanvas, newCanvas, specPropName, specValue) {
+    try {
+      if (oldCanvas.className) newCanvas.className = oldCanvas.className;
+      if (oldCanvas.role) newCanvas.role = oldCanvas.role;
+      if (oldCanvas.ariaLabel) newCanvas.ariaLabel = oldCanvas.ariaLabel;
+      if (oldCanvas.style && newCanvas.style && typeof oldCanvas.style.cssText === "string") {
+        newCanvas.style.cssText = oldCanvas.style.cssText;
+      }
+      // Preserve structTreeLayer accessibility DOM appended inside this.canvas (viewer.mjs:13682)
+      while (oldCanvas.firstChild) {
+        newCanvas.appendChild(oldCanvas.firstChild);
+      }
+      delete newCanvas._zotAdaptiveSpec;
+      delete newCanvas._zotAdaptiveFullSpec;
+      if (specPropName && specValue) {
+        newCanvas[specPropName] = specValue;
+      }
+      if (typeof oldCanvas.replaceWith === "function") {
+        oldCanvas.replaceWith(newCanvas);
+      } else if (oldCanvas.parentNode && typeof oldCanvas.parentNode.replaceChild === "function") {
+        oldCanvas.parentNode.replaceChild(newCanvas, oldCanvas);
+      } else {
+        return false;
+      }
+      pv.canvas = newCanvas;
+      // Release replaced canvas backing store immediately
+      oldCanvas.width = 0;
+      oldCanvas.height = 0;
+      delete oldCanvas._zotAdaptiveSpec;
+      delete oldCanvas._zotAdaptiveFullSpec;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function upgradeVisibleAdaptivePages() {
+    try {
+      if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+      const cfg = bridge.getConfig?.() || {};
+      if (!cfg.adaptiveHiDPI) return;
+      const visibleViews = getVisiblePageViews();
+      for (const pv of visibleViews) {
+        if (!pv || pv.renderingState !== 3) continue;
+        const oldCanvas = pv.canvas;
+        const spec = oldCanvas?._zotAdaptiveSpec;
+        if (!oldCanvas || !spec) continue;
+        if (oldCanvas.isConnected === false) continue;
+        if (oldCanvas.style && oldCanvas.style.transform) continue;
+        if (oldCanvas.width >= spec.origWidth && oldCanvas.height >= spec.origHeight) {
+          delete oldCanvas._zotAdaptiveSpec;
+          oldCanvas._zotAdaptiveFullSpec = spec;
+          continue;
+        }
+        const pageNumber = spec.pageNumber;
+        if (activeAdaptiveUpgrades.has(pageNumber)) continue;
+
+        const hiCanvas = document.createElement("canvas");
+        hiCanvas.width = spec.origWidth;
+        hiCanvas.height = spec.origHeight;
+
+        const reqId = nextReqId++;
+        const upgrade = { reqId, cancelled: false };
+        activeAdaptiveUpgrades.set(pageNumber, upgrade);
+
+        const isAborted = () =>
+          upgrade.cancelled ||
+          !window.__zotMuPDFPatched ||
+          isScrolling ||
+          oldCanvas.isConnected === false ||
+          pv.canvas !== oldCanvas ||
+          pv.renderingState !== 3 ||
+          !!(oldCanvas.style && oldCanvas.style.transform) ||
+          !isPageVisibleInViewer(spec.pageNumber, spec.pageIndex);
+
+        const cleanupHiCanvas = () => {
+          if (activeAdaptiveUpgrades.get(pageNumber) === upgrade) {
+            activeAdaptiveUpgrades.delete(pageNumber);
+          }
+          try {
+            hiCanvas.width = 0;
+            hiCanvas.height = 0;
+          } catch {}
+        };
+
+        const finishOrDiscard = () => {
+          if (activeAdaptiveUpgrades.get(pageNumber) === upgrade) {
+            activeAdaptiveUpgrades.delete(pageNumber);
+          }
+          if (isAborted()) {
+            cleanupHiCanvas();
+            return;
+          }
+          const swapped = atomicSwapPageCanvas(pv, oldCanvas, hiCanvas, "_zotAdaptiveFullSpec", spec);
+          if (!swapped) {
+            cleanupHiCanvas();
+          }
+        };
+
+        const payload = JSON.stringify({
+          reqId,
+          pageIndex: spec.pageIndex,
+          width: spec.origWidth,
+          height: spec.origHeight,
+          baseW: spec.baseW,
+          baseH: spec.baseH,
+          matrix: spec.fullMatrix,
+          includeAnnots: spec.includeAnnots,
+          aaLevel: spec.aaLevel,
+          theme: spec.theme,
+          isMainPage: true,
+          isVisible: true,
+          isDetached: true,
+          isAdaptiveUpgrade: true,
+          hasProvidedCtx: false,
+        });
+
+        bridge.renderPage(
+          payload,
+          hiCanvas,
+          null,
+          isAborted,
+          () => {
+            finishOrDiscard();
+          },
+          (rgbaU8, respW, respH) => {
+            if (isAborted()) {
+              cleanupHiCanvas();
+              return;
+            }
+            try {
+              if (
+                hiCanvas.width !== respW ||
+                hiCanvas.height !== respH ||
+                !rgbaU8 ||
+                rgbaU8.byteLength !== respW * respH * 4
+              ) {
+                cleanupHiCanvas();
+                return;
+              }
+              const ctx = hiCanvas.getContext("2d", {
+                alpha: false,
+                willReadFrequently: cfg.softwareCanvas !== false,
+              });
+              if (!ctx) {
+                cleanupHiCanvas();
+                return;
+              }
+              const clamped = new Uint8ClampedArray(rgbaU8.buffer, rgbaU8.byteOffset, rgbaU8.byteLength);
+              ctx.putImageData(new ImageData(clamped, respW, respH), 0, 0);
+              finishOrDiscard();
+            } catch {
+              cleanupHiCanvas();
+            }
+          },
+          () => {
+            cleanupHiCanvas();
+          }
+        );
+      }
+    } catch {}
+  }
+
+  function demoteOffscreenAdaptivePages() {
+    try {
+      if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+      const cfg = bridge.getConfig?.() || {};
+      if (!cfg.adaptiveHiDPI) return;
+      const viewer = window.PDFViewerApplication?.pdfViewer;
+      const pages = viewer?._pages;
+      if (!Array.isArray(pages) || pages.length === 0) return;
+
+      const visibleIds = new Set();
+      for (const v of getVisiblePageViews()) {
+        if (v && v.id != null) visibleIds.add(v.id);
+      }
+
+      for (let i = 0; i < pages.length; i++) {
+        const pv = pages[i];
+        if (!pv || pv.renderingState !== 3) continue;
+        if (visibleIds.has(pv.id)) continue;
+        const hiCanvas = pv.canvas;
+        const spec = hiCanvas?._zotAdaptiveFullSpec;
+        if (!hiCanvas || !spec) continue;
+        if (hiCanvas.isConnected === false) continue;
+        if (hiCanvas.style && hiCanvas.style.transform) continue;
+        if (hiCanvas.width <= spec.fastW && hiCanvas.height <= spec.fastH) {
+          delete hiCanvas._zotAdaptiveFullSpec;
+          continue;
+        }
+        const downCanvas = document.createElement("canvas");
+        downCanvas.width = spec.fastW;
+        downCanvas.height = spec.fastH;
+        const ctx = downCanvas.getContext?.("2d", {
+          alpha: false,
+          willReadFrequently: cfg.softwareCanvas !== false,
+        });
+        if (!ctx || typeof ctx.drawImage !== "function") {
+          downCanvas.width = 0;
+          downCanvas.height = 0;
+          continue;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(hiCanvas, 0, 0, spec.fastW, spec.fastH);
+        const swapped = atomicSwapPageCanvas(pv, hiCanvas, downCanvas, "_zotAdaptiveSpec", spec);
+        if (!swapped) {
+          downCanvas.width = 0;
+          downCanvas.height = 0;
+        }
+      }
+    } catch {}
+  }
+
+  function scheduleOffscreenAdaptiveDemote() {
+    if (adaptiveDemoteTimer) {
+      clearTimeout(adaptiveDemoteTimer);
+      adaptiveDemoteTimer = null;
+    }
+    const cfg = bridge.getConfig?.() || {};
+    if (!cfg.adaptiveHiDPI) return;
+    adaptiveDemoteTimer = setTimeout(() => {
+      adaptiveDemoteTimer = null;
+      demoteOffscreenAdaptivePages();
+    }, ADAPTIVE_DEMOTE_DELAY_MS);
+  }
+
   function makeCancelledError(pageNumber) {
     const Ctor = window.pdfjsLib?.RenderingCancelledException;
     if (Ctor) {
@@ -369,45 +661,137 @@
         const pageNumber = this.pageNumber;
         const includeAnnots = params.annotationMode !== 0;
         const isMainPage = !isThumb && (width > 450 || height > 450);
+        const isVisible = isMainPage ? isPageVisibleInViewer(pageNumber, pageIndex) : true;
 
-        let totalT = params.transform
+        const skipBlender = !!(params.canvasContext && params.canvasContext.skipBlender);
+        let theme = null;
+        if (!skipBlender && window.theme && window.theme.background && window.theme.foreground) {
+          theme = {
+            background: String(window.theme.background),
+            foreground: String(window.theme.foreground),
+            invertImages: !!window.theme.invertImages,
+          };
+        }
+
+        const origTotalT = params.transform
           ? multiply2D(params.transform, params.viewport.transform)
           : params.viewport.transform;
+        let totalT = origTotalT;
 
-        // Optional user-configured maxOutputScale & 4K maxPageMegapixels cap.
+        // Clear any stale adaptive metadata before re-rendering into this canvas
+        delete targetCanvas._zotAdaptiveSpec;
+        delete targetCanvas._zotAdaptiveFullSpec;
+
+        // Optional user-configured maxOutputScale & 4K maxPageMegapixels / Adaptive HiDPI strategy.
         // Applies only to full main-page renders (never zoomed PDFDetailView tiles or thumbnails),
         // keeping CSS page dimensions, highlights, and textLayer coordinates 100% identical!
+        // In Adaptive HiDPI mode:
+        //   - Off-screen pre-rendered pages (!isVisible) & pages drawn mid-scroll (isScrolling) cap to 3.6 MP;
+        //   - Settled displayed page(s) (isVisible && !isScrolling) render with UNLIMITED native pixels,
+        //     and previously capped visible pages atomically swap to unlimited native once scrolling settles!
         let resizedForMaxScale = false;
+        let pendingAdaptiveSpec = null;
+        let pendingFullSpec = null;
         const maxOutScale = Number(cfg.maxOutputScale) || 0;
+        const adaptiveHiDPI = !!cfg.adaptiveHiDPI;
         const maxPageMP = Number(cfg.maxPageMegapixels) || 0;
         const isFullPageTransform =
           !params.transform || (Math.abs(params.transform[4]) < 1 && Math.abs(params.transform[5]) < 1);
-        if (isMainPage && !ctxAlreadyProvided && isFullPageTransform && (maxOutScale >= 0.75 || maxPageMP >= 1.5)) {
-          let downRatio = 1;
+        if (
+          isMainPage &&
+          !ctxAlreadyProvided &&
+          isFullPageTransform &&
+          (maxOutScale >= 0.75 || maxPageMP >= 1.5 || adaptiveHiDPI)
+        ) {
+          // Step 1: Apply optional explicit DPR cap first to obtain target settled (unlimited-MP) dimensions
+          let fullW = origWidth;
+          let fullH = origHeight;
+          let fullTotalT = origTotalT;
           if (maxOutScale >= 0.75 && params.transform) {
             const curScale = Math.hypot(params.transform[0], params.transform[1]);
             if (Number.isFinite(curScale) && curScale > maxOutScale + 0.02) {
-              downRatio = Math.min(downRatio, maxOutScale / curScale);
+              const dprRatio = maxOutScale / curScale;
+              if (dprRatio < 0.99) {
+                const scaledW = Math.max(1, Math.round(origWidth * dprRatio));
+                const scaledH = Math.max(1, Math.round(origHeight * dprRatio));
+                if (scaledW < origWidth && scaledH < origHeight) {
+                  fullW = scaledW;
+                  fullH = scaledH;
+                  fullTotalT = multiply2D([fullW / origWidth, 0, 0, fullH / origHeight, 0, 0], origTotalT);
+                }
+              }
             }
           }
-          if (maxPageMP >= 1.5) {
+
+          // Step 2: Apply either Adaptive two-tier HiDPI or fixed megapixel cap
+          let renderW = fullW;
+          let renderH = fullH;
+          totalT = fullTotalT;
+
+          if (adaptiveHiDPI) {
+            const fastCapMP = maxPageMP >= 1.5 ? maxPageMP : ADAPTIVE_DEFAULT_FAST_MP;
+            const fastCapPixels = fastCapMP * 1000000;
+            const fullPixels = fullW * fullH;
+            if (fullPixels > fastCapPixels * 1.03) {
+              const mpRatio = Math.sqrt(fastCapPixels / fullPixels);
+              const fastW = Math.max(1, Math.round(fullW * mpRatio));
+              const fastH = Math.max(1, Math.round(fullH * mpRatio));
+              if (fastW < fullW && fastH < fullH) {
+                const fullMatrix = multiply2D(fullTotalT, invBase);
+                let fullMatrixValid = true;
+                for (let i = 0; i < 6; i++) {
+                  if (!Number.isFinite(fullMatrix[i])) {
+                    fullMatrixValid = false;
+                    break;
+                  }
+                }
+                if (fullMatrixValid) {
+                  const adaptiveSpec = {
+                    pageIndex,
+                    pageNumber,
+                    origWidth: fullW,
+                    origHeight: fullH,
+                    fastW,
+                    fastH,
+                    baseW: baseVp.width,
+                    baseH: baseVp.height,
+                    fullMatrix,
+                    includeAnnots,
+                    aaLevel: cfg.aaLevel || 8,
+                    theme,
+                  };
+                  if (!isVisible || isScrolling) {
+                    renderW = fastW;
+                    renderH = fastH;
+                    totalT = multiply2D([fastW / origWidth, 0, 0, fastH / origHeight, 0, 0], origTotalT);
+                    pendingAdaptiveSpec = adaptiveSpec;
+                  } else {
+                    pendingFullSpec = adaptiveSpec;
+                  }
+                }
+              }
+            }
+          } else if (maxPageMP >= 1.5) {
             const maxPixels = maxPageMP * 1000000;
-            const origPixels = origWidth * origHeight;
-            if (origPixels > maxPixels * 1.03) {
-              downRatio = Math.min(downRatio, Math.sqrt(maxPixels / origPixels));
+            const fullPixels = fullW * fullH;
+            if (fullPixels > maxPixels * 1.03) {
+              const mpRatio = Math.sqrt(maxPixels / fullPixels);
+              const capW = Math.max(1, Math.round(fullW * mpRatio));
+              const capH = Math.max(1, Math.round(fullH * mpRatio));
+              if (capW < fullW && capH < fullH) {
+                renderW = capW;
+                renderH = capH;
+                totalT = multiply2D([capW / origWidth, 0, 0, capH / origHeight, 0, 0], origTotalT);
+              }
             }
           }
-          if (downRatio < 0.99) {
-            const newW = Math.max(1, Math.round(origWidth * downRatio));
-            const newH = Math.max(1, Math.round(origHeight * downRatio));
-            if (newW < origWidth && newH < origHeight) {
-              targetCanvas.width = newW;
-              targetCanvas.height = newH;
-              width = newW;
-              height = newH;
-              totalT = multiply2D([newW / origWidth, 0, 0, newH / origHeight, 0, 0], totalT);
-              resizedForMaxScale = true;
-            }
+
+          if (renderW < origWidth || renderH < origHeight) {
+            targetCanvas.width = renderW;
+            targetCanvas.height = renderH;
+            width = renderW;
+            height = renderH;
+            resizedForMaxScale = true;
           }
         }
 
@@ -420,18 +804,6 @@
             }
             return invokeTimedOrigRender();
           }
-        }
-
-        const isVisible = isMainPage ? isPageVisibleInViewer(pageNumber, pageIndex) : true;
-
-        const skipBlender = !!(params.canvasContext && params.canvasContext.skipBlender);
-        let theme = null;
-        if (!skipBlender && window.theme && window.theme.background && window.theme.foreground) {
-          theme = {
-            background: String(window.theme.background),
-            foreground: String(window.theme.foreground),
-            invertImages: !!window.theme.invertImages,
-          };
         }
 
         const pageSelf = this;
@@ -556,6 +928,11 @@
               const activePaint = Number(paintMs) || 0;
               const e2eMs = Math.max(activePaint, performance.now() - tE2EStart - (Number(yieldMs) || 0));
               settled = true;
+              if (pendingAdaptiveSpec) {
+                targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
+              } else if (pendingFullSpec) {
+                targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
+              }
               try {
                 bridge.reportMuPDFPaint?.(e2eMs, activePaint, paintMode || "skia", isMainPage);
               } catch {}
@@ -591,6 +968,11 @@
                 const paintMs = performance.now() - tPaint0 + (Number(cloneMs) || 0);
                 const e2eMs = performance.now() - tE2EStart;
                 settled = true;
+                if (pendingAdaptiveSpec) {
+                  targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
+                } else if (pendingFullSpec) {
+                  targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
+                }
                 try {
                   bridge.reportMuPDFPaint?.(e2eMs, paintMs, "clone", isMainPage);
                 } catch {}
@@ -707,12 +1089,24 @@
     const bindBus = () => {
       if (!app.eventBus || docLoadedListener) return;
       docLoadedListener = () => {
+        cancelAllAdaptiveUpgrades();
         applyRuntimeOpts();
         attachScrollWatcher();
         if (app.pdfDocument) {
           hookPdfDocument(app.pdfDocument);
         }
         patchTextAndStructPrototypes();
+      };
+
+      scaleChangeListener = () => {
+        cancelAllAdaptiveUpgrades();
+      };
+
+      pageChangeListener = () => {
+        if (!isScrolling) {
+          upgradeVisibleAdaptivePages();
+          scheduleOffscreenAdaptiveDemote();
+        }
       };
 
       // Decouple PDFRenderingQueue from PDF.js textLayer/annotationLayer stalls:
@@ -728,6 +1122,9 @@
           try {
             window.PDFViewerApplication?.pdfRenderingQueue?.renderHighestPriority();
           } catch {}
+          if (!isScrolling) {
+            upgradeVisibleAdaptivePages();
+          }
         });
       };
 
@@ -744,6 +1141,10 @@
 
       app.eventBus.on("documentloaded", docLoadedListener);
       app.eventBus.on("pagesinit", docLoadedListener);
+      app.eventBus.on("pagesdestroy", scaleChangeListener);
+      app.eventBus.on("scalechanging", scaleChangeListener);
+      app.eventBus.on("rotationchanging", scaleChangeListener);
+      app.eventBus.on("pagechanging", pageChangeListener);
       app.eventBus.on("pagerendered", pageRenderedListener);
       app.eventBus.on("textlayerrendered", textLayerRenderedListener);
     };
@@ -766,6 +1167,7 @@
 
   function refreshAllPages(coldReset = false) {
     try {
+      cancelAllAdaptiveUpgrades();
       const app = window.PDFViewerApplication;
       const viewer = app?.pdfViewer;
       if (!viewer) return;
@@ -805,6 +1207,7 @@
 
   function uninstall() {
     try {
+      cancelAllAdaptiveUpgrades();
       if (attachRetryTimer) {
         clearTimeout(attachRetryTimer);
         attachRetryTimer = null;
@@ -854,6 +1257,14 @@
           window.PDFViewerApplication.eventBus.off("documentloaded", docLoadedListener);
           window.PDFViewerApplication.eventBus.off("pagesinit", docLoadedListener);
         }
+        if (scaleChangeListener) {
+          window.PDFViewerApplication.eventBus.off("pagesdestroy", scaleChangeListener);
+          window.PDFViewerApplication.eventBus.off("scalechanging", scaleChangeListener);
+          window.PDFViewerApplication.eventBus.off("rotationchanging", scaleChangeListener);
+        }
+        if (pageChangeListener) {
+          window.PDFViewerApplication.eventBus.off("pagechanging", pageChangeListener);
+        }
         if (pageRenderedListener) {
           window.PDFViewerApplication.eventBus.off("pagerendered", pageRenderedListener);
         }
@@ -879,6 +1290,8 @@
     origOpen = null;
     wrappedOpen = null;
     docLoadedListener = null;
+    scaleChangeListener = null;
+    pageChangeListener = null;
     pageRenderedListener = null;
     textLayerRenderedListener = null;
     delete window.__zotMuPDFPatched;

@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.14.0");
+  assert.equal(manifest.version, "0.14.1");
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(
     bootSrc.indexOf("await Zotero.initializationPromise;") < bootSrc.indexOf("const startupAt = Date.now();"),
@@ -60,6 +60,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(xhtml.includes('<menulist id="zt-mupdf-aaLevel"'), "Expected native XUL <menulist> for aaLevel");
   assert.ok(xhtml.includes('<menulist id="zt-mupdf-maxOutputScale"'), "Expected native XUL <menulist> for maxOutputScale");
   assert.ok(xhtml.includes('<menulist id="zt-mupdf-maxPageMegapixels"'), "Expected native XUL <menulist> for maxPageMegapixels");
+  assert.ok(xhtml.includes('<menuitem value="adaptive"'), "Expected adaptive HiDPI option in maxPageMegapixels menulist");
   assert.ok(xhtml.includes('id="zt-mupdf-liteOverlayBlend"'), "Expected liteOverlayBlend checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-mupdf-longDocCssOpt"'), "Expected longDocCssOpt checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-mupdf-deferTextLayerOnScroll"'), "Expected deferTextLayerOnScroll checkbox in preferences.xhtml");
@@ -90,7 +91,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.0 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.1 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2713,4 +2714,246 @@ console.log("=== [Check 21] v0.14.0: 4K 120Hz & Long-Paper Fluidity Suite ===");
   console.log("  PASS: 4K maxPageMegapixels, CSS containment, blend-free scroll, deferred TextLayer/StructTree, 120Hz ViewStats coalescing & bg canvas trim verified");
 }
 
-console.log("\n[ALL 21 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 22] v0.14.1: Adaptive HiDPI (Unlimited Settled Display Page + 3.6 MP Other Pages + Zero-Flicker Atomic Swap) ===");
+{
+  // 22.1: EngineClient.getConfig() parses adaptive, native, and fixed megapixel presets
+  const prefStore = {};
+  const ecCtx = vm.createContext({
+    Zotero: {
+      Prefs: {
+        get: (k) => prefStore[k],
+        set: (k, v) => { prefStore[k] = v; },
+      },
+      debug() {},
+    },
+    Services: { appinfo: { OS: "WINNT", XPCOMABI: "x86_64-msvc" } },
+    Components: { classes: {}, interfaces: {} },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+    ChromeWorker: class {},
+    IOUtils: {},
+    PathUtils: {},
+  });
+  loadScriptInContext("src/engine-client.js", ecCtx);
+  const ec = new ecCtx.ZotMuPDFEngineClient.EngineClient({ rootURI: "file:///", version: "0.14.1" });
+  const cfgDefault = ec.getConfig();
+  assert.equal(cfgDefault.adaptiveHiDPI, true, "Default maxPageMegapixels must enable adaptiveHiDPI");
+  assert.equal(cfgDefault.maxPageMegapixels, 3.6, "Adaptive fast tier cap must default to 3.6 MP");
+  prefStore["extensions.zotero-turbo.mupdf.maxPageMegapixels"] = "";
+  const cfgNative = ec.getConfig();
+  assert.equal(cfgNative.adaptiveHiDPI, false);
+  assert.equal(cfgNative.maxPageMegapixels, 0, "Empty string means unlimited native for all pages");
+  prefStore["extensions.zotero-turbo.mupdf.maxPageMegapixels"] = "6.0";
+  const cfgFixed = ec.getConfig();
+  assert.equal(cfgFixed.adaptiveHiDPI, false);
+  assert.equal(cfgFixed.maxPageMegapixels, 6.0);
+
+  // 22.2: Full Adaptive HiDPI lifecycle in page-patch.js
+  function makeMockCanvas(w, h) {
+    const children = [];
+    const c = {
+      tagName: "CANVAS",
+      width: w,
+      height: h,
+      className: "page-canvas",
+      role: "presentation",
+      style: { cssText: "width: 1400px; height: 1812px;", transform: "" },
+      isConnected: true,
+      parentNode: null,
+      children,
+      drawImageCalls: 0,
+      closest: () => null,
+      get firstChild() { return children[0] || null; },
+      appendChild(node) {
+        if (node._parent) {
+          const i = node._parent.children.indexOf(node);
+          if (i >= 0) node._parent.children.splice(i, 1);
+        }
+        node._parent = c;
+        children.push(node);
+        return node;
+      },
+      replaceWith(next) {
+        c._replacedBy = next;
+        c.isConnected = false;
+        next.isConnected = true;
+      },
+      getContext() {
+        return {
+          imageSmoothingEnabled: false,
+          drawImage() { c.drawImageCalls++; },
+          putImageData() {},
+        };
+      },
+    };
+    return c;
+  }
+
+  class AdaptiveMockPage {
+    constructor(n) { this.pageNumber = n; this._pageIndex = n - 1; }
+    getViewport() { return { width: 595, height: 842, transform: [1, 0, 0, -1, 0, 842] }; }
+    render() { return { promise: Promise.resolve() }; }
+  }
+
+  const scrollListeners2 = [];
+  const busHandlers = new Map();
+  const visibleIds = new Set([1]);
+  const container2 = {
+    classList: { add() {}, remove() {} },
+    addEventListener(ev, fn) { if (ev === "scroll") scrollListeners2.push(fn); },
+    removeEventListener() {},
+  };
+  const mockPages2 = [
+    { id: 1, renderingState: 3, pdfPage: new AdaptiveMockPage(1), canvas: null },
+    { id: 2, renderingState: 3, pdfPage: new AdaptiveMockPage(2), canvas: null },
+    { id: 3, renderingState: 3, pdfPage: new AdaptiveMockPage(3), canvas: null },
+  ];
+  const renderCalls = [];
+  const cancelledReqIds = [];
+  let holdNextUpgrade = false;
+  let heldUpgradeFinish = null;
+
+  const ppCtx2 = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    performance: { now: () => Date.now() },
+    document: {
+      getElementById: (id) => (id === "viewerContainer" ? container2 : null),
+      createElement: (tag) => (tag === "canvas" ? makeMockCanvas(0, 0) : { id: "", textContent: "", remove() {} }),
+      head: { appendChild() {} },
+    },
+    window: null,
+  });
+  ppCtx2.window = ppCtx2;
+  ppCtx2.PDFViewerApplication = {
+    pdfDocument: { getPage: async (n) => mockPages2[n - 1].pdfPage },
+    pdfViewer: {
+      container: container2,
+      currentPageNumber: 1,
+      _pages: mockPages2,
+      _getVisiblePages: () => ({ ids: visibleIds, views: mockPages2.filter((p) => visibleIds.has(p.id)).map((v) => ({ id: v.id, view: v })) }),
+    },
+    eventBus: {
+      on(ev, fn) { if (!busHandlers.has(ev)) busHandlers.set(ev, new Set()); busHandlers.get(ev).add(fn); },
+      off(ev, fn) { busHandlers.get(ev)?.delete(fn); },
+      dispatch(ev, data) { for (const fn of busHandlers.get(ev) || []) fn(data); },
+    },
+    pdfRenderingQueue: { renderHighestPriority() {} },
+  };
+  ppCtx2.__zotMuPDFBridge = {
+    isEnabled: () => true,
+    getConfig: () => ({
+      renderThumbnails: true,
+      aaLevel: 8,
+      softwareCanvas: true,
+      maxOutputScale: 0, // Native 4K 2.0x DPR!
+      adaptiveHiDPI: true,
+      maxPageMegapixels: 3.6,
+      liteOverlayBlend: true,
+      longDocCssOpt: true,
+      deferTextLayerOnScroll: true,
+    }),
+    setPassword() {},
+    cancelRequest(reqId) { cancelledReqIds.push(reqId); },
+    reportFallback() {},
+    reportMuPDFPaint() {},
+    reportTextLayerTiming() {},
+    reportPdfJsTiming() {},
+    renderPage(payloadJSON, _canvas, _ctx, isCancelledFn, onPainted) {
+      const parsed = JSON.parse(payloadJSON);
+      renderCalls.push(parsed);
+      if (holdNextUpgrade && parsed.isAdaptiveUpgrade) {
+        holdNextUpgrade = false;
+        heldUpgradeFinish = () => {
+          if (!isCancelledFn()) onPainted(4.0, "skia-sliced", 0);
+        };
+        return;
+      }
+      onPainted(3.0, parsed.isDetached ? "skia-sliced" : "skia", 0);
+    },
+  };
+  loadScriptInContext("src/page-patch.js", ppCtx2);
+
+  // Case 1: Settled visible Page 1 renders DIRECTLY at unlimited 4K native (2800x3624 = 10.15 MP) in 1 pass!
+  const c1 = makeMockCanvas(2800, 3624);
+  mockPages2[0].canvas = c1;
+  await mockPages2[0].pdfPage.render({
+    canvas: c1,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.equal(c1.width, 2800, "Settled visible page must render at UNLIMITED native width (2800px)");
+  assert.equal(c1.height, 3624, "Settled visible page must render at UNLIMITED native height (3624px)");
+  assert.ok(c1._zotAdaptiveFullSpec, "Unlimited visible page must store _zotAdaptiveFullSpec for later off-screen demotion");
+
+  // Case 2: Off-screen pre-rendered Page 2 caps to <= 3.65 MP (~1668x2158) and saves _zotAdaptiveSpec!
+  const c2 = makeMockCanvas(2800, 3624);
+  const structNode = { tagName: "SPAN", id: "struct-tree-p2" };
+  c2.appendChild(structNode);
+  mockPages2[1].canvas = c2;
+  await mockPages2[1].pdfPage.render({
+    canvas: c2,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.ok(c2.width * c2.height <= 3650000, `Off-screen page must cap to <= 3.65 MP, got ${c2.width}x${c2.height}`);
+  assert.ok(c2._zotAdaptiveSpec, "Capped off-screen page must store _zotAdaptiveSpec for settled upgrade");
+
+  // Case 3: Active scroll into Page 2 + mid-scroll render of Page 3 caps Page 3 to <= 3.65 MP
+  visibleIds.clear();
+  visibleIds.add(2);
+  ppCtx2.PDFViewerApplication.pdfViewer.currentPageNumber = 2;
+  scrollListeners2[0](); // starts active scrolling!
+  const c3 = makeMockCanvas(2800, 3624);
+  mockPages2[2].canvas = c3;
+  visibleIds.add(3);
+  await mockPages2[2].pdfPage.render({
+    canvas: c3,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.ok(c3.width * c3.height <= 3650000, `Mid-scroll visible page must cap to <= 3.65 MP, got ${c3.width}x${c3.height}`);
+
+  // Leave ONLY Page 2 visible and wait > 140ms for scroll settle -> Page 2 atomically upgrades to 2800x3624!
+  visibleIds.delete(3);
+  await new Promise((r) => setTimeout(r, 180));
+  const upgradedC2 = mockPages2[1].canvas;
+  assert.notEqual(upgradedC2, c2, "Settled visible Page 2 must atomically swap pv.canvas to detached hiCanvas");
+  assert.equal(upgradedC2.width, 2800, "Upgraded Page 2 must reach UNLIMITED native 2800px");
+  assert.equal(upgradedC2.height, 3624, "Upgraded Page 2 must reach UNLIMITED native 3624px");
+  assert.equal(upgradedC2.style.cssText, "width: 1400px; height: 1812px;", "CSS dimensions preserved identically");
+  assert.equal(upgradedC2.firstChild, structNode, "structTreeLayer child DOM must be migrated atomically to hiCanvas!");
+  assert.equal(c2.width, 0, "Old capped canvas backing store must be freed (width=0)");
+  assert.equal(c2.height, 0, "Old capped canvas backing store must be freed (height=0)");
+  assert.ok(renderCalls.some((r) => r.isAdaptiveUpgrade && r.isDetached && r.width === 2800), "Upgrade must render off-screen detached");
+
+  // Case 4: Wait > 600ms off-screen settle -> Page 1 (now off-screen!) demotes from 10.15 MP -> 3.6 MP!
+  await new Promise((r) => setTimeout(r, 650));
+  const demotedC1 = mockPages2[0].canvas;
+  assert.notEqual(demotedC1, c1, "Off-screen Page 1 must demote to save 4K VRAM");
+  assert.ok(demotedC1.width * demotedC1.height <= 3650000, `Demoted Page 1 must shrink to <= 3.65 MP, got ${demotedC1.width}x${demotedC1.height}`);
+  assert.equal(demotedC1.drawImageCalls, 1, "Demotion must downsample existing canvas via 2D drawImage");
+  assert.equal(c1.width, 0, "Old unlimited off-screen canvas freed (width=0)");
+  assert.ok(demotedC1._zotAdaptiveSpec, "Demoted Page 1 retains _zotAdaptiveSpec so returning to it upgrades back to unlimited!");
+
+  // Case 5: Resuming scroll mid-upgrade IMMEDIATELY cancels in-flight upgrade & leaves pv.canvas untouched!
+  visibleIds.clear();
+  visibleIds.add(3);
+  ppCtx2.PDFViewerApplication.pdfViewer.currentPageNumber = 3;
+  holdNextUpgrade = true;
+  scrollListeners2[0]();
+  await new Promise((r) => setTimeout(r, 180)); // settle starts held upgrade for Page 3
+  assert.ok(typeof heldUpgradeFinish === "function", "Upgrade for Page 3 must be in-flight");
+  const prevCancels = cancelledReqIds.length;
+  scrollListeners2[0](); // user resumes scrolling before upgrade finishes!
+  assert.ok(cancelledReqIds.length > prevCancels, "Resuming scroll must immediately cancel in-flight adaptive upgrade");
+  heldUpgradeFinish();
+  assert.equal(mockPages2[2].canvas, c3, "Cancelled upgrade must NEVER swap stale hiCanvas onto pv.canvas");
+
+  ppCtx2.__zotMuPDFControl.uninstall();
+  console.log("  PASS: Adaptive HiDPI (1-pass unlimited settled, 3.6 MP off-screen/scroll, atomic zero-flicker swap, structTree migration, off-screen demote & scroll-cancel) verified");
+}
+
+console.log("\n[ALL 22 VERIFICATION SUITES PASSED]");

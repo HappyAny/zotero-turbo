@@ -122,7 +122,8 @@ var ZotTurboPrefs = (function () {
       setMenulistValue($(`zt-mupdf-${MUPDF_MENULIST_SCALE_KEY}`), scaleVal || "native");
     }
     {
-      const mpVal = String(p.getMuPDFPref(MUPDF_MENULIST_MP_KEY) || "");
+      const rawMp = p.getMuPDFPref(MUPDF_MENULIST_MP_KEY);
+      const mpVal = rawMp === undefined || rawMp === null ? "adaptive" : String(rawMp);
       setMenulistValue($(`zt-mupdf-${MUPDF_MENULIST_MP_KEY}`), mpVal || "native");
     }
 
@@ -453,11 +454,17 @@ var ZotTurboPrefs = (function () {
         const onMpSelect = () => {
           const p = plugin();
           if (!p) return;
-          const raw = String(el.value || "native");
+          const raw = String(el.value || "adaptive");
           const stored = raw === "native" ? "" : raw;
           p.setMuPDFPref(MUPDF_MENULIST_MP_KEY, stored);
           p.renderHook?.refreshAllViewers?.(true);
-          setToast(`4K 单页像素上限已更新为 ${stored ? stored + " MP" : "不限制"}`);
+          const label =
+            stored === "adaptive"
+              ? "自适应 (展示页停稳无限制，其他页 3.6 MP)"
+              : stored
+                ? stored + " MP"
+                : "全部不限制";
+          setToast(`4K 单页像素策略已更新为 ${label}`);
         };
         el.addEventListener("command", onMpSelect);
         el.addEventListener("change", onMpSelect);

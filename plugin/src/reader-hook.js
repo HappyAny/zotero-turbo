@@ -897,7 +897,7 @@ var ZotMuPDFReaderHook = (function () {
               if (checkCancelled()) return;
 
               const isMainPage = !!parsed.isMainPage;
-              const priority = isMainPage ? 0 : 1;
+              const priority = parsed.isAdaptiveUpgrade ? 1 : isMainPage ? 0 : 1;
 
               const payload = {
                 path,
@@ -960,7 +960,7 @@ var ZotMuPDFReaderHook = (function () {
                   let paintMs = 0;
                   let yieldMs = 0;
                   const shouldSlice =
-                    parsed.isVisible === false &&
+                    (parsed.isVisible === false || parsed.isDetached === true) &&
                     isMainPage &&
                     res.height >= 800 &&
                     res.width * res.height >= 1500000;

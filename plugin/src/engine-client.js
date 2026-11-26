@@ -219,14 +219,20 @@ var ZotMuPDFEngineClient = (function () {
     getConfig() {
       const rawMaxScale = Number(getPref("maxOutputScale", ""));
       const maxOutputScale = Number.isFinite(rawMaxScale) && rawMaxScale >= 0.75 ? rawMaxScale : 0;
-      const rawMaxMP = getPref("maxPageMegapixels", "4.5");
-      const parsedMaxMP = rawMaxMP === "" || rawMaxMP === "native" ? 0 : Number(rawMaxMP);
-      const maxPageMegapixels = Number.isFinite(parsedMaxMP) && parsedMaxMP >= 1.5 ? parsedMaxMP : 0;
+      const rawMaxMP = String(getPref("maxPageMegapixels", "adaptive") ?? "adaptive").trim();
+      const adaptiveHiDPI = rawMaxMP === "adaptive";
+      const parsedMaxMP = rawMaxMP === "" || rawMaxMP === "native" || adaptiveHiDPI ? 0 : Number(rawMaxMP);
+      const maxPageMegapixels = adaptiveHiDPI
+        ? 3.6
+        : Number.isFinite(parsedMaxMP) && parsedMaxMP >= 1.5
+          ? parsedMaxMP
+          : 0;
       return {
         renderThumbnails: !!getPref("renderThumbnails", true),
         aaLevel: Number(getPref("aaLevel", 8)) || 8,
         softwareCanvas: this.useSoftwareCanvas(),
         maxOutputScale,
+        adaptiveHiDPI,
         maxPageMegapixels,
         liteOverlayBlend: !!getPref("liteOverlayBlend", true),
         longDocCssOpt: !!getPref("longDocCssOpt", true),
@@ -242,7 +248,7 @@ var ZotMuPDFEngineClient = (function () {
     recycleBuffer(buf) {
       if (this.stopped || !buf || this.workers.length === 0) return;
       try {
-        if (buf.byteLength < 1024 * 1024 || buf.byteLength > 64 * 1024 * 1024) return;
+        if (buf.byteLength < 1024 * 1024 || buf.byteLength > 96 * 1024 * 1024) return;
         const idx = this._recycleIdx++ % this.workers.length;
         const slot = this.workers[idx];
         slot.worker.postMessage({ cmd: "recycle", buf }, [buf]);

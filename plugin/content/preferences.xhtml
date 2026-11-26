@@ -138,13 +138,14 @@
           </menulist>
         </html:div>
         <html:div class="zt-field">
-          <html:span class="zt-field-label">4K 单页总像素上限 (控显存)</html:span>
+          <html:span class="zt-field-label">4K 单页像素策略 (控显存)</html:span>
           <menulist id="zt-mupdf-maxPageMegapixels" native="true" class="zt-menulist">
             <menupopup>
-              <menuitem value="native" label="不限制 (原生满像素)"/>
-              <menuitem value="6.0" label="6.0 MP (4K 超清)"/>
-              <menuitem value="4.5" label="4.5 MP (推荐 4K 120Hz，省 45% 显存)"/>
-              <menuitem value="3.2" label="3.2 MP (核显极速)"/>
+              <menuitem value="adaptive" label="自适应 (推荐：展示页停稳无限制，其他页 3.6 MP)"/>
+              <menuitem value="native" label="全部不限制 (原生满像素)"/>
+              <menuitem value="6.0" label="固定 6.0 MP (4K 超清)"/>
+              <menuitem value="4.5" label="固定 4.5 MP (省 45% 显存)"/>
+              <menuitem value="3.2" label="固定 3.2 MP (核显极速)"/>
             </menupopup>
           </menulist>
         </html:div>

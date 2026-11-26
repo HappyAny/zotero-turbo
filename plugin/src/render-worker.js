@@ -56,7 +56,7 @@ function acquireBuffer(byteLen) {
 function releaseBuffer(buf) {
   if (!buf || !(buf instanceof ArrayBuffer)) return;
   const len = buf.byteLength;
-  if (len <= 0 || len > 64 * 1024 * 1024) return;
+  if (len <= 0 || len > 96 * 1024 * 1024) return;
   // Don't pool tiny thumbnail buffers so main-page HiDPI buffer stays warm
   if (len < 1024 * 1024) return;
   bufferPool.length = 0;
