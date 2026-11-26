@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.14.1");
+  assert.equal(manifest.version, "0.14.2");
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(
     bootSrc.indexOf("await Zotero.initializationPromise;") < bootSrc.indexOf("const startupAt = Date.now();"),
@@ -91,7 +91,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.1 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.2 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2734,10 +2734,12 @@ console.log("=== [Check 22] v0.14.1: Adaptive HiDPI (Unlimited Settled Display P
     PathUtils: {},
   });
   loadScriptInContext("src/engine-client.js", ecCtx);
-  const ec = new ecCtx.ZotMuPDFEngineClient.EngineClient({ rootURI: "file:///", version: "0.14.1" });
+  const ec = new ecCtx.ZotMuPDFEngineClient.EngineClient({ rootURI: "file:///", version: "0.14.2" });
   const cfgDefault = ec.getConfig();
   assert.equal(cfgDefault.adaptiveHiDPI, true, "Default maxPageMegapixels must enable adaptiveHiDPI");
   assert.equal(cfgDefault.maxPageMegapixels, 3.6, "Adaptive fast tier cap must default to 3.6 MP");
+  assert.equal(cfgDefault.adaptiveSlowDwellMs, 400, "Default slow-read dwell must be 400ms");
+  assert.equal(cfgDefault.adaptiveFastDwellMs, 1200, "Default fast-flip dwell must be 1200ms");
   prefStore["extensions.zotero-turbo.mupdf.maxPageMegapixels"] = "";
   const cfgNative = ec.getConfig();
   assert.equal(cfgNative.adaptiveHiDPI, false);
@@ -2916,21 +2918,27 @@ console.log("=== [Check 22] v0.14.1: Adaptive HiDPI (Unlimited Settled Display P
   }).promise;
   assert.ok(c3.width * c3.height <= 3650000, `Mid-scroll visible page must cap to <= 3.65 MP, got ${c3.width}x${c3.height}`);
 
-  // Leave ONLY Page 2 visible and wait > 140ms for scroll settle -> Page 2 atomically upgrades to 2800x3624!
+  // Leave ONLY Page 2 visible: brief glance at 180ms stays 3.6 MP (no wasted GPU upload!),
+  // then once slow-read 400ms dwell finishes (~450ms total), Page 2 atomically upgrades to 2800x3624!
   visibleIds.delete(3);
   await new Promise((r) => setTimeout(r, 180));
+  assert.equal(mockPages2[1].canvas, c2, "Brief 180ms glance after scroll must NOT prematurely trigger full-res upgrade");
+  await new Promise((r) => setTimeout(r, 270));
   const upgradedC2 = mockPages2[1].canvas;
-  assert.notEqual(upgradedC2, c2, "Settled visible Page 2 must atomically swap pv.canvas to detached hiCanvas");
+  assert.notEqual(upgradedC2, c2, "Settled visible Page 2 must atomically swap pv.canvas to detached hiCanvas after 400ms dwell");
   assert.equal(upgradedC2.width, 2800, "Upgraded Page 2 must reach UNLIMITED native 2800px");
   assert.equal(upgradedC2.height, 3624, "Upgraded Page 2 must reach UNLIMITED native 3624px");
   assert.equal(upgradedC2.style.cssText, "width: 1400px; height: 1812px;", "CSS dimensions preserved identically");
   assert.equal(upgradedC2.firstChild, structNode, "structTreeLayer child DOM must be migrated atomically to hiCanvas!");
   assert.equal(c2.width, 0, "Old capped canvas backing store must be freed (width=0)");
   assert.equal(c2.height, 0, "Old capped canvas backing store must be freed (height=0)");
-  assert.ok(renderCalls.some((r) => r.isAdaptiveUpgrade && r.isDetached && r.width === 2800), "Upgrade must render off-screen detached");
+  assert.ok(
+    renderCalls.some((r) => r.isAdaptiveUpgrade && r.isDetached && r.skipBgPrerender === true && r.width === 2800),
+    "Upgrade must render off-screen detached with skipBgPrerender=true so MuPDF pixCache stays lean"
+  );
 
   // Case 4: Wait > 600ms off-screen settle -> Page 1 (now off-screen!) demotes from 10.15 MP -> 3.6 MP!
-  await new Promise((r) => setTimeout(r, 650));
+  await new Promise((r) => setTimeout(r, 380));
   const demotedC1 = mockPages2[0].canvas;
   assert.notEqual(demotedC1, c1, "Off-screen Page 1 must demote to save 4K VRAM");
   assert.ok(demotedC1.width * demotedC1.height <= 3650000, `Demoted Page 1 must shrink to <= 3.65 MP, got ${demotedC1.width}x${demotedC1.height}`);
@@ -2944,7 +2952,7 @@ console.log("=== [Check 22] v0.14.1: Adaptive HiDPI (Unlimited Settled Display P
   ppCtx2.PDFViewerApplication.pdfViewer.currentPageNumber = 3;
   holdNextUpgrade = true;
   scrollListeners2[0]();
-  await new Promise((r) => setTimeout(r, 180)); // settle starts held upgrade for Page 3
+  await new Promise((r) => setTimeout(r, 450)); // settle + slow dwell starts held upgrade for Page 3
   assert.ok(typeof heldUpgradeFinish === "function", "Upgrade for Page 3 must be in-flight");
   const prevCancels = cancelledReqIds.length;
   scrollListeners2[0](); // user resumes scrolling before upgrade finishes!
@@ -2956,4 +2964,190 @@ console.log("=== [Check 22] v0.14.1: Adaptive HiDPI (Unlimited Settled Display P
   console.log("  PASS: Adaptive HiDPI (1-pass unlimited settled, 3.6 MP off-screen/scroll, atomic zero-flicker swap, structTree migration, off-screen demote & scroll-cancel) verified");
 }
 
-console.log("\n[ALL 22 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 23] v0.14.2: Rhythm-Aware Fast-Flip Dwell, Instant Click-Upgrade, Primary-Viewport Filter & VRAM Guard ===");
+{
+  function makeRectCanvas(w, h) {
+    const c = {
+      tagName: "CANVAS",
+      width: w,
+      height: h,
+      className: "page-canvas",
+      role: "presentation",
+      style: { cssText: "width: 1400px; height: 1812px;", transform: "" },
+      isConnected: true,
+      drawImageCalls: 0,
+      closest: () => null,
+      firstChild: null,
+      appendChild() {},
+      replaceWith(next) { c.isConnected = false; next.isConnected = true; },
+      getContext() { return { imageSmoothingEnabled: false, drawImage() { c.drawImageCalls++; }, putImageData() {} }; },
+    };
+    return c;
+  }
+  class RhythmPage {
+    constructor(n) { this.pageNumber = n; this._pageIndex = n - 1; }
+    getViewport() { return { width: 595, height: 842, transform: [1, 0, 0, -1, 0, 842] }; }
+    render() { return { promise: Promise.resolve() }; }
+  }
+
+  const containerListeners = new Map();
+  const container3 = {
+    scrollTop: 0,
+    classList: { add() {}, remove() {} },
+    getBoundingClientRect: () => ({ top: 0, bottom: 1000, width: 1600, height: 1000 }),
+    addEventListener(ev, fn) {
+      if (!containerListeners.has(ev)) containerListeners.set(ev, []);
+      containerListeners.get(ev).push(fn);
+    },
+    removeEventListener() {},
+    fire(ev, arg) { for (const fn of containerListeners.get(ev) || []) fn(arg); },
+  };
+
+  // Page 1 & 2 full off-screen, Page 5 primary (85% of viewport), Page 6 peeking edge (15% of viewport!)
+  const pageRects = {
+    1: { top: -3000, bottom: -2000, height: 1000 },
+    2: { top: -1800, bottom: -800, height: 1000 },
+    5: { top: 0, bottom: 850, height: 850 },
+    6: { top: 850, bottom: 1700, height: 850 }, // only 150px visible = 17.6% < 35%!
+  };
+  const visible3 = new Set([1]);
+  const pages3 = [1, 2, 3, 4, 5, 6].map((id) => ({
+    id,
+    renderingState: 3,
+    pdfPage: new RhythmPage(id),
+    canvas: null,
+    div: { getBoundingClientRect: () => pageRects[id] || { top: 5000, bottom: 6000, height: 1000 } },
+  }));
+  const payloads3 = [];
+  const ppCtx3 = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    performance: { now: () => Date.now() },
+    document: {
+      getElementById: (id) => (id === "viewerContainer" ? container3 : null),
+      createElement: (tag) => (tag === "canvas" ? makeRectCanvas(0, 0) : { id: "", textContent: "", remove() {} }),
+      head: { appendChild() {} },
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    window: null,
+  });
+  ppCtx3.window = ppCtx3;
+  ppCtx3.PDFViewerApplication = {
+    pdfDocument: { getPage: async (n) => pages3[n - 1].pdfPage },
+    pdfViewer: {
+      container: container3,
+      currentPageNumber: 1,
+      _pages: pages3,
+      _getVisiblePages: () => ({ ids: visible3, views: pages3.filter((p) => visible3.has(p.id)).map((v) => ({ id: v.id, view: v })) }),
+    },
+    eventBus: { on() {}, off() {} },
+    pdfRenderingQueue: { renderHighestPriority() {} },
+  };
+  ppCtx3.__zotMuPDFBridge = {
+    isEnabled: () => true,
+    getConfig: () => ({
+      renderThumbnails: true,
+      aaLevel: 8,
+      softwareCanvas: true,
+      maxOutputScale: 0,
+      adaptiveHiDPI: true,
+      maxPageMegapixels: 3.6,
+      adaptiveSlowDwellMs: 220, // fast unit-test timing
+      adaptiveFastDwellMs: 520,
+      liteOverlayBlend: true,
+      longDocCssOpt: true,
+      deferTextLayerOnScroll: true,
+    }),
+    setPassword() {},
+    cancelRequest() {},
+    reportFallback() {},
+    reportMuPDFPaint() {},
+    reportTextLayerTiming() {},
+    reportPdfJsTiming() {},
+    renderPage(payloadJSON, _canvas, _ctx, _isCancelled, onPainted) {
+      payloads3.push(JSON.parse(payloadJSON));
+      onPainted(2.0, "skia", 0);
+    },
+  };
+  loadScriptInContext("src/page-patch.js", ppCtx3);
+
+  // Render Page 1 & Page 2 as full unlimited first (simulating 2 previously-read pages!)
+  const p1c = makeRectCanvas(2800, 3624);
+  pages3[0].canvas = p1c;
+  await pages3[0].pdfPage.render({
+    canvas: p1c,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.equal(payloads3[0].skipBgPrerender, true, "Initial 1-pass unlimited 4K render must set skipBgPrerender=true");
+
+  visible3.clear();
+  visible3.add(2);
+  ppCtx3.PDFViewerApplication.pdfViewer.currentPageNumber = 2;
+  const p2c = makeRectCanvas(2800, 3624);
+  pages3[1].canvas = p2c;
+  await pages3[1].pdfPage.render({
+    canvas: p2c,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+
+  // Fast-flip jump from Page 2 -> Page 5 (pageDelta = 3 >= 2, scrollPx = 5000 >= 2400 -> fast-flip mode!)
+  // Page 5 is 85% visible (primary), Page 6 is only 15% peeking at bottom edge!
+  container3.scrollTop = 0;
+  container3.fire("scroll");
+  visible3.clear();
+  visible3.add(5);
+  visible3.add(6);
+  ppCtx3.PDFViewerApplication.pdfViewer.currentPageNumber = 5;
+  container3.scrollTop = 5000;
+  const p5c = makeRectCanvas(2800, 3624);
+  const p6c = makeRectCanvas(2800, 3624);
+  pages3[4].canvas = p5c;
+  pages3[5].canvas = p6c;
+  await pages3[4].pdfPage.render({
+    canvas: p5c,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  await pages3[5].pdfPage.render({
+    canvas: p6c,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  container3.fire("scroll");
+
+  // Wait 280ms (past 140ms scroll settle AND past 220ms slow dwell, still inside 520ms fast-flip dwell!):
+  // 1) Fast-flip dwell holds Page 5 at 3.6 MP (no wasted full-res render on quick glance!)
+  // 2) Immediate excess VRAM guard demoted oldest off-screen Page 1 right at 140ms settle!
+  await new Promise((r) => setTimeout(r, 280));
+  assert.equal(pages3[4].canvas, p5c, "Fast-flip brief glance (280ms < 520ms) must keep Page 5 at 3.6 MP");
+  assert.notEqual(pages3[0].canvas, p1c, "Excess off-screen unlimited Page 1 must be demoted immediately at settle");
+  assert.equal(p1c.width, 0, "Demoted Page 1 old full-res canvas backing store freed immediately");
+
+  // Click OUTSIDE .page (e.g. scrollbar) -> must NOT trigger instant upgrade!
+  container3.fire("pointerdown", { target: { closest: () => null } });
+  assert.equal(pages3[4].canvas, p5c, "Clicking scrollbar outside .page must NOT trigger instant upgrade");
+
+  // Click INSIDE .page -> explicit reading intent skips remaining fast-flip dwell IMMEDIATELY (0ms)!
+  container3.fire("pointerdown", { target: { closest: (sel) => (sel === ".page" ? {} : null) } });
+  assert.notEqual(pages3[4].canvas, p5c, "Clicking inside .page must IMMEDIATELY upgrade primary Page 5 to unlimited!");
+  assert.equal(pages3[4].canvas.width, 2800, "Upgraded primary Page 5 reaches full 2800px native");
+  assert.equal(pages3[5].canvas, p6c, "Barely peeking edge Page 6 (<35% visible) must STAY at 3.6 MP (zero wasted VRAM!)");
+  assert.ok(pages3[5].canvas.width * pages3[5].canvas.height <= 3650000);
+
+  // Verify C source declares ZOT_RENDER_FLAG_NO_BG_PRERENDER and guards schedule_bg_prerenders
+  const dllSrc = fs.readFileSync(path.join(ROOT, "native/zot_dll.c"), "utf8");
+  assert.ok(dllSrc.includes("ZOT_RENDER_FLAG_NO_BG_PRERENDER"), "zot_dll.c must define ZOT_RENDER_FLAG_NO_BG_PRERENDER");
+  assert.ok(dllSrc.includes("if (!skip_bg_prerender"), "zot_dll.c must skip bg pre-renders on unlimited adaptive renders");
+
+  ppCtx3.__zotMuPDFControl.uninstall();
+  console.log("  PASS: Rhythm-aware fast-flip dwell, 0ms page-click upgrade, scrollbar guard, primary-viewport filter & immediate excess VRAM demotion verified");
+}
+
+console.log("\n[ALL 23 VERIFICATION SUITES PASSED]");

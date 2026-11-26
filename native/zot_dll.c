@@ -116,6 +116,7 @@ static inline void zot_thread_yield(void) { sched_yield(); }
 #define MAX_ACTIVE_COOKIES 64
 #define BG_QUEUE_CAP 16
 #define MAX_PIX_RECYCLE 1
+#define ZOT_RENDER_FLAG_NO_BG_PRERENDER 2
 
 /* Thread-local open document cache: each foreground ChromeWorker and each bg_worker
  * owns its own fz_document* handles -> ZERO cross-thread doc_lock, ZERO priority inversion,
@@ -1423,6 +1424,9 @@ ZOT_EXPORT int zot_dll_render_rgba(
         theme.invert_images = invert_images ? 1 : 0;
     }
 
+    int skip_bg_prerender = (include_annots & ZOT_RENDER_FLAG_NO_BG_PRERENDER) != 0;
+    int actual_annots = (include_annots & 1) ? 1 : 0;
+
     PixKey pk;
     memset(&pk, 0, sizeof(pk));
     pk.path = (char *)path_utf8;
@@ -1433,7 +1437,7 @@ ZOT_EXPORT int zot_dll_render_rgba(
     pk.width = width;
     pk.height = height;
     quantize_m(m, pk.qm);
-    pk.include_annots = include_annots ? 1 : 0;
+    pk.include_annots = actual_annots;
     pk.aa_level = aa_level;
     pk.theme = theme;
 
@@ -1448,7 +1452,9 @@ ZOT_EXPORT int zot_dll_render_rgba(
             out_stats[2] = hit_pw;
             out_stats[3] = hit_ph;
         }
-        schedule_bg_prerenders(eng, path_utf8, password_utf8, mtime, fsize, page_index, hit_pc, width, height, hit_pw, hit_ph, m, pk.include_annots, aa_level, &theme);
+        if (!skip_bg_prerender) {
+            schedule_bg_prerenders(eng, path_utf8, password_utf8, mtime, fsize, page_index, hit_pc, width, height, hit_pw, hit_ph, m, pk.include_annots, aa_level, &theme);
+        }
         return 0;
     }
 
@@ -1503,7 +1509,7 @@ ZOT_EXPORT int zot_dll_render_rgba(
     }
 
     if (rc == 0) {
-        if (width >= 650 || height >= 650) {
+        if (!skip_bg_prerender && (width >= 650 || height >= 650)) {
             // Skip redundant 25MB foreground pix_store_copy (Zotero DOM canvas holds this page right now!);
             // keep pixCache dedicated to upcoming off-thread bg pre-renders (+dir, +2*dir, -dir).
             schedule_bg_prerenders(eng, path_utf8, password_utf8, mtime, fsize, page_index, page_count, width, height, pw, ph, m, pk.include_annots, aa_level, &theme);

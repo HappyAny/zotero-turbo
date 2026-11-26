@@ -227,6 +227,10 @@ var ZotMuPDFEngineClient = (function () {
         : Number.isFinite(parsedMaxMP) && parsedMaxMP >= 1.5
           ? parsedMaxMP
           : 0;
+      const rawSlowDwell = Number(getPref("adaptiveSlowDwellMs", 400));
+      const adaptiveSlowDwellMs = Number.isFinite(rawSlowDwell) && rawSlowDwell >= 140 ? rawSlowDwell : 400;
+      const rawFastDwell = Number(getPref("adaptiveFastDwellMs", 1200));
+      const adaptiveFastDwellMs = Number.isFinite(rawFastDwell) && rawFastDwell >= adaptiveSlowDwellMs ? rawFastDwell : 1200;
       return {
         renderThumbnails: !!getPref("renderThumbnails", true),
         aaLevel: Number(getPref("aaLevel", 8)) || 8,
@@ -234,6 +238,8 @@ var ZotMuPDFEngineClient = (function () {
         maxOutputScale,
         adaptiveHiDPI,
         maxPageMegapixels,
+        adaptiveSlowDwellMs,
+        adaptiveFastDwellMs,
         liteOverlayBlend: !!getPref("liteOverlayBlend", true),
         longDocCssOpt: !!getPref("longDocCssOpt", true),
         deferTextLayerOnScroll: !!getPref("deferTextLayerOnScroll", true),
@@ -248,7 +254,9 @@ var ZotMuPDFEngineClient = (function () {
     recycleBuffer(buf) {
       if (this.stopped || !buf || this.workers.length === 0) return;
       try {
-        if (buf.byteLength < 1024 * 1024 || buf.byteLength > 96 * 1024 * 1024) return;
+        // Keep <=32MB fast-tier scroll buffers (e.g. 14.4MB 3.6MP) warm in the worker pool while
+        // letting one-shot 40-80MB unlimited 4K upgrade buffers release straight back to the OS!
+        if (buf.byteLength < 1024 * 1024 || buf.byteLength > 32 * 1024 * 1024) return;
         const idx = this._recycleIdx++ % this.workers.length;
         const slot = this.workers[idx];
         slot.worker.postMessage({ cmd: "recycle", buf }, [buf]);

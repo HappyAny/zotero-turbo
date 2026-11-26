@@ -56,7 +56,8 @@ function acquireBuffer(byteLen) {
 function releaseBuffer(buf) {
   if (!buf || !(buf instanceof ArrayBuffer)) return;
   const len = buf.byteLength;
-  if (len <= 0 || len > 96 * 1024 * 1024) return;
+  // Pool <=32MB scrolling buffers (e.g. 14.4MB 3.6MP); let one-shot 40-80MB unlimited upgrade buffers free immediately!
+  if (len <= 0 || len > 32 * 1024 * 1024) return;
   // Don't pool tiny thumbnail buffers so main-page HiDPI buffer stays warm
   if (len < 1024 * 1024) return;
   bufferPool.length = 0;
@@ -327,6 +328,7 @@ self.onmessage = function (ev) {
       height,
       matrix,
       includeAnnots,
+      skipBgPrerender,
       aaLevel,
       theme,
     } = msg;
@@ -372,7 +374,7 @@ self.onmessage = function (ev) {
         matrix[3],
         matrix[4],
         matrix[5],
-        includeAnnots ? 1 : 0,
+        (includeAnnots ? 1 : 0) | (skipBgPrerender ? 2 : 0),
         aaLevel || 8,
         themeEnabled,
         bgRgb,

@@ -46,27 +46,49 @@
   let attachRetryTries = 0;
 
   // 4K 120Hz & long-document runtime optimizations (CSS isolation, blend-free scroll, scroll-settled textLayer,
-  // and Adaptive HiDPI: 3.6 MP fast tier for off-screen/scrolling pages -> unlimited native atomic swap on settle)
+  // and Rhythm-Aware Adaptive HiDPI: 3.6 MP fast tier for off-screen/scrolling/peeking pages ->
+  // slow-read 400ms / fast-flip 1200ms dwell (or 0ms on page click/selection) -> unlimited native atomic swap,
+  // plus off-screen demotion & ZOT_RENDER_FLAG_NO_BG_PRERENDER so VRAM/pixCache stay ultra-lean!)
   const OPT_STYLE_ID = "zot-turbo-4k-style";
   const SCROLL_CLASS = "zot-turbo-scrolling";
   const SCROLL_SETTLE_MS = 140;
   const ADAPTIVE_DEFAULT_FAST_MP = 3.6;
+  const ADAPTIVE_DEFAULT_SLOW_DWELL_MS = 400;
+  const ADAPTIVE_DEFAULT_FAST_DWELL_MS = 1200;
+  const ADAPTIVE_PRIMARY_MIN_RATIO = 0.35;
   const ADAPTIVE_DEMOTE_DELAY_MS = 600;
   let scrollContainer = null;
   let scrollListener = null;
+  let pointerDownListener = null;
+  let selectionChangeListener = null;
   let scrollIdleTimer = null;
+  let adaptiveUpgradeTimer = null;
   let adaptiveDemoteTimer = null;
   let isScrolling = false;
+  let scrollSessionStartAt = 0;
+  let scrollSessionStartPage = 0;
+  let scrollSessionStartTop = 0;
+  let lastScrollEndAt = 0;
+  let recentFlipBursts = 0;
+  let lastRhythmWasFast = false;
   let scrollSettleWaiters = [];
   const activeAdaptiveUpgrades = new Map(); // pageNumber -> { reqId, cancelled }
 
   const pageRenderEndTimes = new Map(); // pageNumber -> performance.now()
 
-  function cancelAllAdaptiveUpgrades() {
+  function cancelPendingAdaptiveTimers() {
+    if (adaptiveUpgradeTimer) {
+      clearTimeout(adaptiveUpgradeTimer);
+      adaptiveUpgradeTimer = null;
+    }
     if (adaptiveDemoteTimer) {
       clearTimeout(adaptiveDemoteTimer);
       adaptiveDemoteTimer = null;
     }
+  }
+
+  function cancelAllAdaptiveUpgrades() {
+    cancelPendingAdaptiveTimers();
     if (activeAdaptiveUpgrades.size === 0) return;
     for (const entry of activeAdaptiveUpgrades.values()) {
       entry.cancelled = true;
@@ -75,6 +97,55 @@
       } catch {}
     }
     activeAdaptiveUpgrades.clear();
+  }
+
+  function isInFastFlipCooldown() {
+    return adaptiveUpgradeTimer !== null && lastRhythmWasFast;
+  }
+
+  function getAdaptiveDwellMs(isFastFlip) {
+    try {
+      const cfg = bridge.getConfig?.() || {};
+      const slowRaw = Number(cfg.adaptiveSlowDwellMs);
+      const fastRaw = Number(cfg.adaptiveFastDwellMs);
+      const slowMs = Number.isFinite(slowRaw) && slowRaw >= SCROLL_SETTLE_MS ? slowRaw : ADAPTIVE_DEFAULT_SLOW_DWELL_MS;
+      const fastMs = Number.isFinite(fastRaw) && fastRaw >= slowMs ? fastRaw : ADAPTIVE_DEFAULT_FAST_DWELL_MS;
+      return isFastFlip ? fastMs : slowMs;
+    } catch {
+      return isFastFlip ? ADAPTIVE_DEFAULT_FAST_DWELL_MS : ADAPTIVE_DEFAULT_SLOW_DWELL_MS;
+    }
+  }
+
+  function scheduleAdaptiveUpgrade(extraDelayMs) {
+    if (adaptiveUpgradeTimer) {
+      clearTimeout(adaptiveUpgradeTimer);
+      adaptiveUpgradeTimer = null;
+    }
+    const cfg = bridge.getConfig?.() || {};
+    if (!cfg.adaptiveHiDPI || !bridge.isEnabled() || isScrolling) return;
+    const delay = Math.max(0, Number(extraDelayMs) || 0);
+    if (delay === 0) {
+      upgradeVisibleAdaptivePages();
+      return;
+    }
+    adaptiveUpgradeTimer = setTimeout(() => {
+      adaptiveUpgradeTimer = null;
+      lastRhythmWasFast = false;
+      upgradeVisibleAdaptivePages();
+    }, delay);
+  }
+
+  function triggerImmediateAdaptiveUpgrade() {
+    if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+    const cfg = bridge.getConfig?.() || {};
+    if (!cfg.adaptiveHiDPI) return;
+    if (adaptiveUpgradeTimer) {
+      clearTimeout(adaptiveUpgradeTimer);
+      adaptiveUpgradeTimer = null;
+    }
+    lastRhythmWasFast = false;
+    recentFlipBursts = 0;
+    upgradeVisibleAdaptivePages();
   }
 
   function flushScrollWaiters() {
@@ -141,7 +212,15 @@
       if (scrollContainer && scrollListener) {
         try {
           scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+          if (pointerDownListener) {
+            scrollContainer.removeEventListener("pointerdown", pointerDownListener, { passive: true });
+          }
           scrollContainer.classList?.remove(SCROLL_CLASS);
+        } catch {}
+      }
+      if (selectionChangeListener && typeof document.removeEventListener === "function") {
+        try {
+          document.removeEventListener("selectionchange", selectionChangeListener);
         } catch {}
       }
       scrollContainer = container;
@@ -149,6 +228,15 @@
         cancelAllAdaptiveUpgrades();
         if (!isScrolling) {
           isScrolling = true;
+          const now = performance.now();
+          if (lastScrollEndAt > 0 && now - lastScrollEndAt < 2500) {
+            recentFlipBursts++;
+          } else {
+            recentFlipBursts = 0;
+          }
+          scrollSessionStartAt = now;
+          scrollSessionStartPage = window.PDFViewerApplication?.pdfViewer?.currentPageNumber | 0;
+          scrollSessionStartTop = Number(scrollContainer?.scrollTop) || 0;
           try {
             const cfg = bridge.getConfig?.() || {};
             if (cfg.liteOverlayBlend !== false) {
@@ -165,12 +253,54 @@
           try {
             scrollContainer?.classList?.remove(SCROLL_CLASS);
           } catch {}
+          const now = performance.now();
+          const endPage = window.PDFViewerApplication?.pdfViewer?.currentPageNumber | 0;
+          const endTop = Number(scrollContainer?.scrollTop) || 0;
+          const pageDelta =
+            scrollSessionStartPage > 0 && endPage > 0 ? Math.abs(endPage - scrollSessionStartPage) : 0;
+          const scrollPx = Math.abs(endTop - scrollSessionStartTop);
+          const activeDurMs = Math.max(80, now - scrollSessionStartAt - SCROLL_SETTLE_MS);
+          const pxPerSec = (scrollPx * 1000) / activeDurMs;
+          const isFastFlip =
+            pageDelta >= 2 || pxPerSec >= 1800 || scrollPx >= 2400 || recentFlipBursts >= 2;
+          lastScrollEndAt = now;
+          lastRhythmWasFast = isFastFlip;
+
+          // Restore TextLayer & StructTree promptly at 140ms so text selection & highlights stay snappy
           flushScrollWaiters();
-          upgradeVisibleAdaptivePages();
+          // Immediately reclaim VRAM if >= 2 off-screen full-res canvases are sitting around,
+          // then demote any remaining off-screen full-res canvas after 600ms
+          demoteOffscreenAdaptivePages(1);
           scheduleOffscreenAdaptiveDemote();
+          // Decoupled rhythm-aware HiDPI upgrade: 400ms total on slow reading, 1200ms on fast skimming
+          const totalDwellMs = getAdaptiveDwellMs(isFastFlip);
+          scheduleAdaptiveUpgrade(Math.max(0, totalDwellMs - SCROLL_SETTLE_MS));
         }, SCROLL_SETTLE_MS);
       };
       scrollContainer.addEventListener("scroll", scrollListener, { passive: true });
+
+      // Explicit reading-intent shortcut: clicking/selecting inside a PDF page skips remaining dwell immediately!
+      pointerDownListener = ev => {
+        if (isScrolling) return;
+        const target = ev?.target;
+        if (target && typeof target.closest === "function" && target.closest(".page")) {
+          triggerImmediateAdaptiveUpgrade();
+        }
+      };
+      scrollContainer.addEventListener("pointerdown", pointerDownListener, { passive: true });
+
+      if (typeof document.addEventListener === "function") {
+        selectionChangeListener = () => {
+          if (isScrolling || adaptiveUpgradeTimer === null) return;
+          try {
+            const sel = window.getSelection?.();
+            if (sel && !sel.isCollapsed && String(sel).length > 0) {
+              triggerImmediateAdaptiveUpgrade();
+            }
+          } catch {}
+        };
+        document.addEventListener("selectionchange", selectionChangeListener);
+      }
     } catch {}
   }
 
@@ -358,6 +488,65 @@
     return out;
   }
 
+  function getViewVisibilityScore(pv) {
+    try {
+      const viewer = window.PDFViewerApplication?.pdfViewer;
+      const container = viewer?.container || scrollContainer;
+      const pageDiv = pv?.div;
+      if (
+        !container ||
+        !pageDiv ||
+        typeof pageDiv.getBoundingClientRect !== "function" ||
+        typeof container.getBoundingClientRect !== "function"
+      ) {
+        return null;
+      }
+      const pr = pageDiv.getBoundingClientRect();
+      const cr = container.getBoundingClientRect();
+      if (!cr || !pr || cr.height <= 0 || pr.height <= 0) return null;
+      const visH = Math.max(0, Math.min(pr.bottom, cr.bottom) - Math.max(pr.top, cr.top));
+      if (visH <= 0) return { visH: 0, pageRatio: 0, viewRatio: 0 };
+      return {
+        visH,
+        pageRatio: visH / pr.height,
+        viewRatio: visH / cr.height,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function isPrimaryVisibleView(pv, visibleCount) {
+    if (!pv) return false;
+    if (visibleCount <= 1) return true;
+    const score = getViewVisibilityScore(pv);
+    if (!score) return true;
+    if (score.visH <= 0) return false;
+    if (score.pageRatio >= ADAPTIVE_PRIMARY_MIN_RATIO || score.viewRatio >= ADAPTIVE_PRIMARY_MIN_RATIO) {
+      return true;
+    }
+    const curPage = window.PDFViewerApplication?.pdfViewer?.currentPageNumber | 0;
+    if (curPage > 0 && (pv.id | 0) === curPage && (score.pageRatio >= 0.1 || score.viewRatio >= 0.1)) {
+      return true;
+    }
+    return false;
+  }
+
+  function isPrimaryVisiblePage(pageNumber, pageIndex) {
+    try {
+      const visibleViews = getVisiblePageViews();
+      if (visibleViews.length <= 1) return true;
+      for (const pv of visibleViews) {
+        if (pv && (pv.id === pageNumber || pv.id === pageIndex + 1)) {
+          return isPrimaryVisibleView(pv, visibleViews.length);
+        }
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
   function atomicSwapPageCanvas(pv, oldCanvas, newCanvas, specPropName, specValue) {
     try {
       if (oldCanvas.className) newCanvas.className = oldCanvas.className;
@@ -372,8 +561,12 @@
       }
       delete newCanvas._zotAdaptiveSpec;
       delete newCanvas._zotAdaptiveFullSpec;
+      delete newCanvas._zotFullAt;
       if (specPropName && specValue) {
         newCanvas[specPropName] = specValue;
+        if (specPropName === "_zotAdaptiveFullSpec") {
+          newCanvas._zotFullAt = performance.now();
+        }
       }
       if (typeof oldCanvas.replaceWith === "function") {
         oldCanvas.replaceWith(newCanvas);
@@ -383,11 +576,12 @@
         return false;
       }
       pv.canvas = newCanvas;
-      // Release replaced canvas backing store immediately
+      // Release replaced canvas backing store & WebRender GPU texture immediately
       oldCanvas.width = 0;
       oldCanvas.height = 0;
       delete oldCanvas._zotAdaptiveSpec;
       delete oldCanvas._zotAdaptiveFullSpec;
+      delete oldCanvas._zotFullAt;
       return true;
     } catch {
       return false;
@@ -400,8 +594,11 @@
       const cfg = bridge.getConfig?.() || {};
       if (!cfg.adaptiveHiDPI) return;
       const visibleViews = getVisiblePageViews();
+      const visCount = visibleViews.length;
       for (const pv of visibleViews) {
         if (!pv || pv.renderingState !== 3) continue;
+        // Skip barely peeking top/bottom edge pages (< 35% visible) so only primary reading page(s) use full VRAM
+        if (!isPrimaryVisibleView(pv, visCount)) continue;
         const oldCanvas = pv.canvas;
         const spec = oldCanvas?._zotAdaptiveSpec;
         if (!oldCanvas || !spec) continue;
@@ -410,6 +607,7 @@
         if (oldCanvas.width >= spec.origWidth && oldCanvas.height >= spec.origHeight) {
           delete oldCanvas._zotAdaptiveSpec;
           oldCanvas._zotAdaptiveFullSpec = spec;
+          oldCanvas._zotFullAt = performance.now();
           continue;
         }
         const pageNumber = spec.pageNumber;
@@ -466,6 +664,7 @@
           baseH: spec.baseH,
           matrix: spec.fullMatrix,
           includeAnnots: spec.includeAnnots,
+          skipBgPrerender: true,
           aaLevel: spec.aaLevel,
           theme: spec.theme,
           isMainPage: true,
@@ -521,7 +720,7 @@
     } catch {}
   }
 
-  function demoteOffscreenAdaptivePages() {
+  function demoteOffscreenAdaptivePages(keepMostRecent = 0) {
     try {
       if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
       const cfg = bridge.getConfig?.() || {};
@@ -535,6 +734,7 @@
         if (v && v.id != null) visibleIds.add(v.id);
       }
 
+      const candidates = [];
       for (let i = 0; i < pages.length; i++) {
         const pv = pages[i];
         if (!pv || pv.renderingState !== 3) continue;
@@ -548,6 +748,18 @@
           delete hiCanvas._zotAdaptiveFullSpec;
           continue;
         }
+        candidates.push({ pv, hiCanvas, spec, fullAt: Number(hiCanvas._zotFullAt) || 0 });
+      }
+
+      const keep = Math.max(0, keepMostRecent | 0);
+      if (candidates.length <= keep) return;
+      if (keep > 0) {
+        // Demote oldest off-screen unlimited canvases first, keeping the most recent neighbor briefly until 600ms
+        candidates.sort((a, b) => a.fullAt - b.fullAt);
+      }
+      const demoteCount = candidates.length - keep;
+      for (let i = 0; i < demoteCount; i++) {
+        const { pv, hiCanvas, spec } = candidates[i];
         const downCanvas = document.createElement("canvas");
         downCanvas.width = spec.fastW;
         downCanvas.height = spec.fastH;
@@ -580,7 +792,7 @@
     if (!cfg.adaptiveHiDPI) return;
     adaptiveDemoteTimer = setTimeout(() => {
       adaptiveDemoteTimer = null;
-      demoteOffscreenAdaptivePages();
+      demoteOffscreenAdaptivePages(0);
     }, ADAPTIVE_DEMOTE_DELAY_MS);
   }
 
@@ -760,7 +972,12 @@
                     aaLevel: cfg.aaLevel || 8,
                     theme,
                   };
-                  if (!isVisible || isScrolling) {
+                  const useFastTier =
+                    !isVisible ||
+                    isScrolling ||
+                    isInFastFlipCooldown() ||
+                    !isPrimaryVisiblePage(pageNumber, pageIndex);
+                  if (useFastTier) {
                     renderW = fastW;
                     renderH = fastH;
                     totalT = multiply2D([fastW / origWidth, 0, 0, fastH / origHeight, 0, 0], origTotalT);
@@ -911,6 +1128,7 @@
             baseH: baseVp.height,
             matrix: muMatrix,
             includeAnnots,
+            skipBgPrerender: !!pendingFullSpec,
             aaLevel: cfg.aaLevel || 8,
             theme,
             isMainPage,
@@ -932,6 +1150,7 @@
                 targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
               } else if (pendingFullSpec) {
                 targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
+                targetCanvas._zotFullAt = performance.now();
               }
               try {
                 bridge.reportMuPDFPaint?.(e2eMs, activePaint, paintMode || "skia", isMainPage);
@@ -972,6 +1191,7 @@
                   targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
                 } else if (pendingFullSpec) {
                   targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
+                  targetCanvas._zotFullAt = performance.now();
                 }
                 try {
                   bridge.reportMuPDFPaint?.(e2eMs, paintMs, "clone", isMainPage);
@@ -1103,8 +1323,8 @@
       };
 
       pageChangeListener = () => {
-        if (!isScrolling) {
-          upgradeVisibleAdaptivePages();
+        if (!isScrolling && adaptiveUpgradeTimer === null) {
+          scheduleAdaptiveUpgrade(Math.max(0, getAdaptiveDwellMs(false) - SCROLL_SETTLE_MS));
           scheduleOffscreenAdaptiveDemote();
         }
       };
@@ -1122,7 +1342,8 @@
           try {
             window.PDFViewerApplication?.pdfRenderingQueue?.renderHighestPriority();
           } catch {}
-          if (!isScrolling) {
+          // Only upgrade right away if dwell cooldown has already elapsed (never bypass fast-flip dwell!)
+          if (!isScrolling && adaptiveUpgradeTimer === null) {
             upgradeVisibleAdaptivePages();
           }
         });
@@ -1221,11 +1442,21 @@
       if (scrollContainer && scrollListener) {
         try {
           scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+          if (pointerDownListener) {
+            scrollContainer.removeEventListener("pointerdown", pointerDownListener, { passive: true });
+          }
           scrollContainer.classList?.remove(SCROLL_CLASS);
+        } catch {}
+      }
+      if (selectionChangeListener && typeof document.removeEventListener === "function") {
+        try {
+          document.removeEventListener("selectionchange", selectionChangeListener);
         } catch {}
       }
       scrollContainer = null;
       scrollListener = null;
+      pointerDownListener = null;
+      selectionChangeListener = null;
       try {
         document.getElementById(OPT_STYLE_ID)?.remove();
       } catch {}

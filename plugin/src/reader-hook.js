@@ -907,6 +907,7 @@ var ZotMuPDFReaderHook = (function () {
                 height: parsed.height | 0,
                 matrix: parsed.matrix,
                 includeAnnots: !!parsed.includeAnnots,
+                skipBgPrerender: !!parsed.skipBgPrerender,
                 aaLevel: parsed.aaLevel || 8,
                 theme: parsed.theme || null,
               };
