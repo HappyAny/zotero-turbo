@@ -41,20 +41,22 @@
   let pageRenderedListener = null;
   let textLayerRenderedListener = null;
   let scaleChangeListener = null;
+  let resetAdaptiveListener = null;
   let pageChangeListener = null;
   let attachRetryTimer = null;
   let attachRetryTries = 0;
 
   // 4K 120Hz & long-document runtime optimizations (CSS isolation, blend-free scroll, scroll-settled textLayer,
-  // and Rhythm-Aware Adaptive HiDPI: 3.6 MP fast tier for off-screen/scrolling/peeking pages ->
-  // slow-read 400ms / fast-flip 1200ms dwell (or 0ms on page click/selection) -> unlimited native atomic swap,
-  // plus off-screen demotion & ZOT_RENDER_FLAG_NO_BG_PRERENDER so VRAM/pixCache stay ultra-lean!)
+  // and Rhythm-Aware Adaptive HiDPI: 3.6 MP fast tier for off-screen/scrolling/zooming/peeking pages ->
+  // slow-read 400ms / fast-flip 1200ms / zoom 250ms dwell (or 0ms on page click/selection) -> unlimited native
+  // atomic swap, plus off-screen demotion & ZOT_RENDER_FLAG_NO_BG_PRERENDER so VRAM/pixCache stay ultra-lean!)
   const OPT_STYLE_ID = "zot-turbo-4k-style";
   const SCROLL_CLASS = "zot-turbo-scrolling";
   const SCROLL_SETTLE_MS = 140;
   const ADAPTIVE_DEFAULT_FAST_MP = 3.6;
   const ADAPTIVE_DEFAULT_SLOW_DWELL_MS = 400;
   const ADAPTIVE_DEFAULT_FAST_DWELL_MS = 1200;
+  const ADAPTIVE_DEFAULT_ZOOM_DWELL_MS = 250;
   const ADAPTIVE_PRIMARY_MIN_RATIO = 0.35;
   const ADAPTIVE_DEMOTE_DELAY_MS = 600;
   let scrollContainer = null;
@@ -62,9 +64,11 @@
   let pointerDownListener = null;
   let selectionChangeListener = null;
   let scrollIdleTimer = null;
+  let zoomIdleTimer = null;
   let adaptiveUpgradeTimer = null;
   let adaptiveDemoteTimer = null;
   let isScrolling = false;
+  let isZooming = false;
   let scrollSessionStartAt = 0;
   let scrollSessionStartPage = 0;
   let scrollSessionStartTop = 0;
@@ -75,6 +79,24 @@
   const activeAdaptiveUpgrades = new Map(); // pageNumber -> { reqId, cancelled }
 
   const pageRenderEndTimes = new Map(); // pageNumber -> performance.now()
+
+  function getAdaptiveZoomDwellMs() {
+    try {
+      const cfg = bridge.getConfig?.() || {};
+      const raw = Number(cfg.adaptiveZoomDwellMs);
+      return Number.isFinite(raw) && raw >= 80 ? raw : ADAPTIVE_DEFAULT_ZOOM_DWELL_MS;
+    } catch {
+      return ADAPTIVE_DEFAULT_ZOOM_DWELL_MS;
+    }
+  }
+
+  function clearZoomIdleState() {
+    if (zoomIdleTimer) {
+      clearTimeout(zoomIdleTimer);
+      zoomIdleTimer = null;
+    }
+    isZooming = false;
+  }
 
   function cancelPendingAdaptiveTimers() {
     if (adaptiveUpgradeTimer) {
@@ -122,7 +144,7 @@
       adaptiveUpgradeTimer = null;
     }
     const cfg = bridge.getConfig?.() || {};
-    if (!cfg.adaptiveHiDPI || !bridge.isEnabled() || isScrolling) return;
+    if (!cfg.adaptiveHiDPI || !bridge.isEnabled() || isScrolling || isZooming) return;
     const delay = Math.max(0, Number(extraDelayMs) || 0);
     if (delay === 0) {
       upgradeVisibleAdaptivePages();
@@ -136,7 +158,7 @@
   }
 
   function triggerImmediateAdaptiveUpgrade() {
-    if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+    if (!window.__zotMuPDFPatched || isScrolling || isZooming || !bridge.isEnabled()) return;
     const cfg = bridge.getConfig?.() || {};
     if (!cfg.adaptiveHiDPI) return;
     if (adaptiveUpgradeTimer) {
@@ -226,6 +248,8 @@
       scrollContainer = container;
       scrollListener = () => {
         cancelAllAdaptiveUpgrades();
+        window.__zotTurboIsScrolling = true;
+        window.__zotTurboLastScrollAt = Date.now();
         if (!isScrolling) {
           isScrolling = true;
           const now = performance.now();
@@ -250,6 +274,8 @@
         scrollIdleTimer = setTimeout(() => {
           scrollIdleTimer = null;
           isScrolling = false;
+          window.__zotTurboIsScrolling = false;
+          window.__zotTurboLastScrollAt = Date.now();
           try {
             scrollContainer?.classList?.remove(SCROLL_CLASS);
           } catch {}
@@ -590,7 +616,7 @@
 
   function upgradeVisibleAdaptivePages() {
     try {
-      if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+      if (!window.__zotMuPDFPatched || isScrolling || isZooming || !bridge.isEnabled()) return;
       const cfg = bridge.getConfig?.() || {};
       if (!cfg.adaptiveHiDPI) return;
       const visibleViews = getVisiblePageViews();
@@ -625,6 +651,7 @@
           upgrade.cancelled ||
           !window.__zotMuPDFPatched ||
           isScrolling ||
+          isZooming ||
           oldCanvas.isConnected === false ||
           pv.canvas !== oldCanvas ||
           pv.renderingState !== 3 ||
@@ -652,6 +679,10 @@
           const swapped = atomicSwapPageCanvas(pv, oldCanvas, hiCanvas, "_zotAdaptiveFullSpec", spec);
           if (!swapped) {
             cleanupHiCanvas();
+          } else {
+            try {
+              bridge.reportAdaptiveEvent?.("upgrade");
+            } catch {}
           }
         };
 
@@ -722,7 +753,7 @@
 
   function demoteOffscreenAdaptivePages(keepMostRecent = 0) {
     try {
-      if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+      if (!window.__zotMuPDFPatched || isScrolling || isZooming || !bridge.isEnabled()) return;
       const cfg = bridge.getConfig?.() || {};
       if (!cfg.adaptiveHiDPI) return;
       const viewer = window.PDFViewerApplication?.pdfViewer;
@@ -778,6 +809,10 @@
         if (!swapped) {
           downCanvas.width = 0;
           downCanvas.height = 0;
+        } else {
+          try {
+            bridge.reportAdaptiveEvent?.("demote");
+          } catch {}
         }
       }
     } catch {}
@@ -975,6 +1010,7 @@
                   const useFastTier =
                     !isVisible ||
                     isScrolling ||
+                    isZooming ||
                     isInFastFlipCooldown() ||
                     !isPrimaryVisiblePage(pageNumber, pageIndex);
                   if (useFastTier) {
@@ -1148,9 +1184,17 @@
               settled = true;
               if (pendingAdaptiveSpec) {
                 targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
+                if (isVisible) {
+                  try {
+                    bridge.reportAdaptiveEvent?.("fast");
+                  } catch {}
+                }
               } else if (pendingFullSpec) {
                 targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
                 targetCanvas._zotFullAt = performance.now();
+                try {
+                  bridge.reportAdaptiveEvent?.("unlimited");
+                } catch {}
               }
               try {
                 bridge.reportMuPDFPaint?.(e2eMs, activePaint, paintMode || "skia", isMainPage);
@@ -1189,9 +1233,17 @@
                 settled = true;
                 if (pendingAdaptiveSpec) {
                   targetCanvas._zotAdaptiveSpec = pendingAdaptiveSpec;
+                  if (isVisible) {
+                    try {
+                      bridge.reportAdaptiveEvent?.("fast");
+                    } catch {}
+                  }
                 } else if (pendingFullSpec) {
                   targetCanvas._zotAdaptiveFullSpec = pendingFullSpec;
                   targetCanvas._zotFullAt = performance.now();
+                  try {
+                    bridge.reportAdaptiveEvent?.("unlimited");
+                  } catch {}
                 }
                 try {
                   bridge.reportMuPDFPaint?.(e2eMs, paintMs, "clone", isMainPage);
@@ -1318,12 +1370,33 @@
         patchTextAndStructPrototypes();
       };
 
-      scaleChangeListener = () => {
+      resetAdaptiveListener = () => {
+        clearZoomIdleState();
         cancelAllAdaptiveUpgrades();
       };
 
+      scaleChangeListener = () => {
+        cancelAllAdaptiveUpgrades();
+        const cfg = bridge.getConfig?.() || {};
+        if (cfg.adaptiveHiDPI && bridge.isEnabled()) {
+          isZooming = true;
+          if (zoomIdleTimer) {
+            clearTimeout(zoomIdleTimer);
+            zoomIdleTimer = null;
+          }
+          zoomIdleTimer = setTimeout(() => {
+            zoomIdleTimer = null;
+            isZooming = false;
+            if (!window.__zotMuPDFPatched || isScrolling || !bridge.isEnabled()) return;
+            demoteOffscreenAdaptivePages(1);
+            scheduleOffscreenAdaptiveDemote();
+            upgradeVisibleAdaptivePages();
+          }, getAdaptiveZoomDwellMs());
+        }
+      };
+
       pageChangeListener = () => {
-        if (!isScrolling && adaptiveUpgradeTimer === null) {
+        if (!isScrolling && !isZooming && adaptiveUpgradeTimer === null) {
           scheduleAdaptiveUpgrade(Math.max(0, getAdaptiveDwellMs(false) - SCROLL_SETTLE_MS));
           scheduleOffscreenAdaptiveDemote();
         }
@@ -1342,8 +1415,8 @@
           try {
             window.PDFViewerApplication?.pdfRenderingQueue?.renderHighestPriority();
           } catch {}
-          // Only upgrade right away if dwell cooldown has already elapsed (never bypass fast-flip dwell!)
-          if (!isScrolling && adaptiveUpgradeTimer === null) {
+          // Only upgrade right away if dwell cooldown & zoom settle have already elapsed
+          if (!isScrolling && !isZooming && adaptiveUpgradeTimer === null) {
             upgradeVisibleAdaptivePages();
           }
         });
@@ -1362,9 +1435,9 @@
 
       app.eventBus.on("documentloaded", docLoadedListener);
       app.eventBus.on("pagesinit", docLoadedListener);
-      app.eventBus.on("pagesdestroy", scaleChangeListener);
+      app.eventBus.on("pagesdestroy", resetAdaptiveListener);
       app.eventBus.on("scalechanging", scaleChangeListener);
-      app.eventBus.on("rotationchanging", scaleChangeListener);
+      app.eventBus.on("rotationchanging", resetAdaptiveListener);
       app.eventBus.on("pagechanging", pageChangeListener);
       app.eventBus.on("pagerendered", pageRenderedListener);
       app.eventBus.on("textlayerrendered", textLayerRenderedListener);
@@ -1388,6 +1461,7 @@
 
   function refreshAllPages(coldReset = false) {
     try {
+      clearZoomIdleState();
       cancelAllAdaptiveUpgrades();
       const app = window.PDFViewerApplication;
       const viewer = app?.pdfViewer;
@@ -1428,6 +1502,7 @@
 
   function uninstall() {
     try {
+      clearZoomIdleState();
       cancelAllAdaptiveUpgrades();
       if (attachRetryTimer) {
         clearTimeout(attachRetryTimer);
@@ -1438,6 +1513,8 @@
         scrollIdleTimer = null;
       }
       isScrolling = false;
+      delete window.__zotTurboIsScrolling;
+      delete window.__zotTurboLastScrollAt;
       flushScrollWaiters();
       if (scrollContainer && scrollListener) {
         try {
@@ -1488,10 +1565,12 @@
           window.PDFViewerApplication.eventBus.off("documentloaded", docLoadedListener);
           window.PDFViewerApplication.eventBus.off("pagesinit", docLoadedListener);
         }
+        if (resetAdaptiveListener) {
+          window.PDFViewerApplication.eventBus.off("pagesdestroy", resetAdaptiveListener);
+          window.PDFViewerApplication.eventBus.off("rotationchanging", resetAdaptiveListener);
+        }
         if (scaleChangeListener) {
-          window.PDFViewerApplication.eventBus.off("pagesdestroy", scaleChangeListener);
           window.PDFViewerApplication.eventBus.off("scalechanging", scaleChangeListener);
-          window.PDFViewerApplication.eventBus.off("rotationchanging", scaleChangeListener);
         }
         if (pageChangeListener) {
           window.PDFViewerApplication.eventBus.off("pagechanging", pageChangeListener);
@@ -1522,6 +1601,7 @@
     wrappedOpen = null;
     docLoadedListener = null;
     scaleChangeListener = null;
+    resetAdaptiveListener = null;
     pageChangeListener = null;
     pageRenderedListener = null;
     textLayerRenderedListener = null;

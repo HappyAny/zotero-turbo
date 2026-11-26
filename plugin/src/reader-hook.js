@@ -212,6 +212,13 @@ var ZotMuPDFReaderHook = (function () {
     _disposeThumbHook(th, restoreOrig = true) {
       if (!th) return;
       this.thumbHooks.delete(th);
+      if (th.flushTimer) {
+        clearTimeout(th.flushTimer);
+        th.flushTimer = null;
+      }
+      if (th.pendingThumbs) {
+        th.pendingThumbs.clear();
+      }
       if (restoreOrig) {
         try {
           const alive = th.iframeWin && !th.iframeWin.closed;
@@ -599,6 +606,9 @@ var ZotMuPDFReaderHook = (function () {
       entry.rawThumbs = rawThumbs;
       entry.origRender = origRender;
       entry.origConcurrency = origConcurrency;
+      entry.pendingThumbs = entry.pendingThumbs || new Map();
+      entry.flushTimer = entry.flushTimer || null;
+      entry.coalescedFlushes = entry.coalescedFlushes || 0;
       this.thumbHooks.add(entry);
       state.thumbHooks.add(entry);
 
@@ -614,12 +624,56 @@ var ZotMuPDFReaderHook = (function () {
         const thumbsSelf = this?.wrappedJSObject || this || rawThumbs;
         return new iframeWin.Promise((resolve, reject) => {
           self
-            ._renderThumbnailFast(state, rawPv, thumbsSelf, origRender, pageIndex | 0)
+            ._renderThumbnailFast(state, rawPv, thumbsSelf, origRender, pageIndex | 0, entry)
             .then(() => resolve(), err => reject(err));
         });
       }, iframeWin);
       entry.wrappedRender = wrappedThumbRender;
       rawThumbs._render = wrappedThumbRender;
+    }
+
+    _flushPendingThumbnails(entry) {
+      if (!entry) return;
+      if (entry.flushTimer) {
+        clearTimeout(entry.flushTimer);
+        entry.flushTimer = null;
+      }
+      const pending = entry.pendingThumbs;
+      if (!pending || pending.size === 0) return;
+      const items = Array.from(pending.entries());
+      pending.clear();
+      if (this._destroyed || !entry.iframeWin || entry.iframeWin.closed) return;
+      const rawThumbs = entry.rawThumbs;
+      if (!rawThumbs || !rawThumbs._thumbnails || typeof rawThumbs._thumbnails.slice !== "function") return;
+
+      const nextArr = rawThumbs._thumbnails.slice();
+      for (const [pIdx, thumb] of items) {
+        nextArr[pIdx] = thumb;
+      }
+      rawThumbs._thumbnails = nextArr;
+      entry.coalescedFlushes = (entry.coalescedFlushes || 0) + 1;
+
+      try {
+        const vWin = rawThumbs._window?.wrappedJSObject || rawThumbs._window;
+        if (vWin?.PDFViewerApplication?.eventBus?.dispatch) {
+          for (const [pIdx] of items) {
+            const evObj = new vWin.Object();
+            evObj.source = rawThumbs;
+            evObj.pageNumber = pIdx + 1;
+            vWin.PDFViewerApplication.eventBus.dispatch("thumbnailrendered", evObj);
+          }
+        }
+      } catch {}
+
+      try {
+        if (rawThumbs._onRender) {
+          for (const [, thumb] of items) {
+            rawThumbs._onRender(thumb);
+          }
+        } else if (rawThumbs._onUpdate) {
+          rawThumbs._onUpdate(rawThumbs._thumbnails);
+        }
+      } catch {}
     }
 
     _getThumbScratchContext(width, height) {
@@ -681,7 +735,7 @@ var ZotMuPDFReaderHook = (function () {
       return scratch.canvas.toDataURL("image/jpeg", 0.85);
     }
 
-    async _renderThumbnailFast(state, rawPv, rawThumbs, origRender, pageIndex) {
+    async _renderThumbnailFast(state, rawPv, rawThumbs, origRender, pageIndex, hookEntry = null) {
       const cfg = this.engine.getConfig();
       if (this._destroyed || !this.engine.isEnabled() || !cfg.renderThumbnails) {
         return origRender.call(rawThumbs, pageIndex);
@@ -780,6 +834,20 @@ var ZotMuPDFReaderHook = (function () {
         if (!rawThumbs._thumbnails || typeof rawThumbs._thumbnails.slice !== "function") {
           return origRender.call(rawThumbs, pageIndex);
         }
+
+        // Coalesce burst thumbnail completions into 16ms frame batches so 800-page books don't copy
+        // the full _thumbnails array and force React virtual-list reconciles on every single thumbnail.
+        if (hookEntry && hookEntry.pendingThumbs) {
+          hookEntry.rawThumbs = rawThumbs;
+          hookEntry.pendingThumbs.set(pageIndex, renderedThumbnail);
+          if (!hookEntry.flushTimer) {
+            hookEntry.flushTimer = setTimeout(() => {
+              this._flushPendingThumbnails(hookEntry);
+            }, 16);
+          }
+          return;
+        }
+
         const nextArr = rawThumbs._thumbnails.slice();
         nextArr[pageIndex] = renderedThumbnail;
         rawThumbs._thumbnails = nextArr;
@@ -849,6 +917,9 @@ var ZotMuPDFReaderHook = (function () {
           },
           reportFallback: reason => {
             this.engine.reportFallback(reason);
+          },
+          reportAdaptiveEvent: kind => {
+            this.engine.reportAdaptiveEvent(String(kind || ""));
           },
           reportMuPDFPaint: (e2eMs, paintMs, paintMode, isMainPage) => {
             this.engine.reportMuPDFPaint(Number(e2eMs), Number(paintMs), String(paintMode || ""), !!isMainPage);
@@ -1664,6 +1735,15 @@ var ZotMuPDFReaderHook = (function () {
         summary.thumbCount > 0
           ? `\n侧栏缩略图加速: 已渲染 ${summary.thumbCount} 张（最近 ${fmtMs(summary.thumbLastMs)}ms · ${summary.fgWorkers || 2}线程直出）`
           : "";
+      const adaptiveTierStr =
+        summary.lastAdaptiveTier === "unlimited"
+          ? "原画无限制"
+          : summary.lastAdaptiveTier === "fast"
+            ? "极速 3.6MP"
+            : "待命";
+      const adaptiveLine = summary.adaptiveHiDPI
+        ? `\n自适应 HiDPI: 当前 ${adaptiveTierStr} · 升级 ${summary.adaptiveUpgrades || 0} 次 · 显存回收 ${summary.adaptiveDemotes || 0} 次`
+        : "";
 
       const applyDom = (nameText, dotColor, metricText, titleText) => {
         if (rec._lastName !== nameText) {
@@ -1731,6 +1811,7 @@ var ZotMuPDFReaderHook = (function () {
           `状态: 已启用（单击切换 PDF.js；右键快捷内存菜单；Shift+单击清缓存冷启动对比）\n` +
           `最近端到端: ${fmtMs(summary.lastE2EMs)}ms（引擎 ${fmtMs(summary.lastRenderMs)}ms · 通信 ${fmtMs(ipcTotalMs)}ms · 绘制 ${fmtMs(summary.lastPaintMs)}ms${modeSuffix}）\n` +
           `总渲染: ${summary.totalRenders} 次 | 预渲染位图命中: ${pixPct}% | 均值: ${fmtMs(summary.avgE2EMs || summary.avgRenderMs)}ms | 取消: ${summary.cancelledRenders || 0} | 回退: ${summary.fallbacks}` +
+          adaptiveLine +
           thumbLine +
           textLayerLine +
           compareLine +

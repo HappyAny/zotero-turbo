@@ -23,6 +23,34 @@
   let retryTimer = null;
   let idleCleanupTimer = null;
   let retryCount = 0;
+  let scrollContainer = null;
+  let scrollListener = null;
+  let localLastScrollAt = 0;
+
+  function attachScrollActivityTracker() {
+    try {
+      const container =
+        window.PDFViewerApplication?.pdfViewer?.container ||
+        (typeof document !== "undefined" ? document.getElementById?.("viewerContainer") : null);
+      if (!container || container === scrollContainer || typeof container.addEventListener !== "function") return;
+      if (scrollContainer && scrollListener) {
+        try {
+          scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+        } catch {}
+      }
+      scrollContainer = container;
+      scrollListener = () => {
+        localLastScrollAt = Date.now();
+      };
+      scrollContainer.addEventListener("scroll", scrollListener, { passive: true });
+    } catch {}
+  }
+
+  function isScrollRecentlyActive(idleMs) {
+    if (window.__zotTurboIsScrolling === true) return true;
+    const last = Math.max(Number(window.__zotTurboLastScrollAt) || 0, localLastScrollAt);
+    return last > 0 && Date.now() - last < idleMs;
+  }
 
   // Ctrl+F sequential sweep detector + parallel lookahead prefetch queue
   let lastSeqPage = -10;
@@ -332,6 +360,14 @@
           typeof bridge.getProcessedDataDelayMs === "function"
             ? Math.max(0, Number(bridge.getProcessedDataDelayMs()) || 0)
             : 1500;
+        const scrollIdleMs =
+          typeof bridge.getProcessedDataScrollIdleMs === "function"
+            ? Math.max(0, Number(bridge.getProcessedDataScrollIdleMs()) || 0)
+            : 1500;
+        const maxScrollWaitMs =
+          typeof bridge.getProcessedDataMaxScrollWaitMs === "function"
+            ? Math.max(0, Number(bridge.getProcessedDataMaxScrollWaitMs()) || 0)
+            : 12000;
 
         // If user explicitly lowered maxPages cap and this huge textbook exceeds it, skip heavy 100-page scan
         if (Number.isFinite(maxPages) && maxPages >= 0 && docSelf.numPages > maxPages) {
@@ -346,6 +382,19 @@
         // If tab was hibernated or unpatched during the defer window, skip waking PDF.js Worker
         if (window.closed || !window.__zotTurboTextPatched) {
           return { pages: {} };
+        }
+        // Never wake heavy PDF.js Worker mid-scroll: wait until scroll stays quiet >= scrollIdleMs
+        if (scrollIdleMs > 0 && maxScrollWaitMs > 0) {
+          let waited = 0;
+          while (isScrollRecentlyActive(scrollIdleMs) && waited < maxScrollWaitMs) {
+            const step = Math.min(250, maxScrollWaitMs - waited);
+            if (step <= 0) break;
+            await new Promise((r) => setTimeout(r, step));
+            waited += step;
+            if (window.closed || !window.__zotTurboTextPatched) {
+              return { pages: {} };
+            }
+          }
         }
 
         try {
@@ -372,12 +421,14 @@
       proto.getProcessedData = wrappedGetProcessedData;
     }
 
+    attachScrollActivityTracker();
     scheduleIdleCleanup(pdfDoc, 5000);
     return true;
   }
 
   function tryAttach() {
     try {
+      attachScrollActivityTracker();
       const app = window.PDFViewerApplication;
       if (app && app.pdfDocument) {
         if (patchDocProto(app.pdfDocument)) {
@@ -428,6 +479,14 @@
         clearTimeout(idleCleanupTimer);
         idleCleanupTimer = null;
       }
+      if (scrollContainer && scrollListener) {
+        try {
+          scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+        } catch {}
+      }
+      scrollContainer = null;
+      scrollListener = null;
+      localLastScrollAt = 0;
       resetSweepState();
       if (patchedDocProto) {
         if (origGetPageData && patchedDocProto.getPageData === wrappedGetPageData) {

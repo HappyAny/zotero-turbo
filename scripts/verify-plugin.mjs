@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.14.2");
+  assert.equal(manifest.version, "0.15.0");
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(
     bootSrc.indexOf("await Zotero.initializationPromise;") < bootSrc.indexOf("const startupAt = Date.now();"),
@@ -91,7 +91,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.2 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.15.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -3150,4 +3150,276 @@ console.log("=== [Check 23] v0.14.2: Rhythm-Aware Fast-Flip Dwell, Instant Click
   console.log("  PASS: Rhythm-aware fast-flip dwell, 0ms page-click upgrade, scrollbar guard, primary-viewport filter & immediate excess VRAM demotion verified");
 }
 
-console.log("\n[ALL 23 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 24] v0.15.0: Zoom Fast Tier, Scroll-Idle getProcessedData, Main UI Collections Overscan + Containment, Thumbnail Coalescing & Adaptive Capsule Telemetry ===");
+{
+  // 24.1 Ctrl+Wheel continuous zoom uses 3.6 MP fast tier mid-zoom, upgrades to unlimited 250ms after zoom settles, and reports adaptive telemetry!
+  function makeZoomCanvas(w, h) {
+    const c = {
+      tagName: "CANVAS",
+      width: w,
+      height: h,
+      className: "page-canvas",
+      role: "presentation",
+      style: { cssText: "width: 1400px; height: 1812px;", transform: "" },
+      isConnected: true,
+      closest: () => null,
+      firstChild: null,
+      appendChild() {},
+      replaceWith(next) { c.isConnected = false; next.isConnected = true; },
+      getContext() { return { imageSmoothingEnabled: false, drawImage() {}, putImageData() {} }; },
+    };
+    return c;
+  }
+  class ZoomPage {
+    constructor(n) { this.pageNumber = n; this._pageIndex = n - 1; }
+    getViewport() { return { width: 595, height: 842, transform: [1, 0, 0, -1, 0, 842] }; }
+    render() { return { promise: Promise.resolve() }; }
+  }
+  const busHandlers = new Map();
+  const zPages = [{ id: 1, renderingState: 3, pdfPage: new ZoomPage(1), canvas: null, div: { getBoundingClientRect: () => ({ top: 0, bottom: 900, height: 900 }) } }];
+  const zContainer = {
+    scrollTop: 0,
+    classList: { add() {}, remove() {} },
+    getBoundingClientRect: () => ({ top: 0, bottom: 900, width: 1600, height: 900 }),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const adaptiveEvents = [];
+  const zCtx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    performance: { now: () => Date.now() },
+    document: {
+      getElementById: (id) => (id === "viewerContainer" ? zContainer : null),
+      createElement: (tag) => (tag === "canvas" ? makeZoomCanvas(0, 0) : { id: "", textContent: "", remove() {} }),
+      head: { appendChild() {} },
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    window: null,
+  });
+  zCtx.window = zCtx;
+  zCtx.PDFViewerApplication = {
+    pdfDocument: { getPage: async () => zPages[0].pdfPage },
+    pdfViewer: {
+      container: zContainer,
+      currentPageNumber: 1,
+      _pages: zPages,
+      _getVisiblePages: () => ({ ids: new Set([1]), views: [{ id: 1, view: zPages[0] }] }),
+    },
+    eventBus: {
+      on(ev, fn) { if (!busHandlers.has(ev)) busHandlers.set(ev, []); busHandlers.get(ev).push(fn); },
+      off() {},
+      emit(ev, arg) { for (const fn of busHandlers.get(ev) || []) fn(arg); },
+    },
+    pdfRenderingQueue: { renderHighestPriority() {} },
+  };
+  zCtx.__zotMuPDFBridge = {
+    isEnabled: () => true,
+    getConfig: () => ({
+      renderThumbnails: true,
+      aaLevel: 8,
+      softwareCanvas: true,
+      maxOutputScale: 0,
+      adaptiveHiDPI: true,
+      maxPageMegapixels: 3.6,
+      adaptiveZoomDwellMs: 120, // fast unit-test timing
+      liteOverlayBlend: true,
+      longDocCssOpt: true,
+      deferTextLayerOnScroll: true,
+    }),
+    setPassword() {},
+    cancelRequest() {},
+    reportFallback() {},
+    reportAdaptiveEvent(kind) { adaptiveEvents.push(kind); },
+    reportMuPDFPaint() {},
+    reportTextLayerTiming() {},
+    reportPdfJsTiming() {},
+    renderPage(_payloadJSON, _canvas, _ctx, _isCancelled, onPainted) {
+      onPainted(2.0, "skia", 0);
+    },
+  };
+  loadScriptInContext("src/page-patch.js", zCtx);
+
+  // Trigger scalechanging (Ctrl+Wheel zoom!) -> mid-zoom render must cap to <= 3.65 MP fast tier
+  zCtx.PDFViewerApplication.eventBus.emit("scalechanging", { scale: 1.75 });
+  const zc1 = makeZoomCanvas(2800, 3624);
+  zPages[0].canvas = zc1;
+  await zPages[0].pdfPage.render({
+    canvas: zc1,
+    viewport: { width: 1400, height: 1812, transform: [2.35, 0, 0, -2.35, 0, 1812] },
+    transform: [2.0, 0, 0, 2.0, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.ok(zc1.width * zc1.height <= 3650000, `Mid-zoom canvas must stay in <= 3.65 MP fast tier, got ${zc1.width}x${zc1.height}`);
+  assert.ok(adaptiveEvents.includes("fast"), "Mid-zoom fast render must report 'fast' adaptive event");
+  // Wait for zoom settle (120ms) -> primary visible page atomically upgrades to full 2800x3624!
+  await new Promise((r) => setTimeout(r, 180));
+  assert.notEqual(zPages[0].canvas, zc1, "Settled zoom must atomically swap pv.canvas to full-res hiCanvas");
+  assert.equal(zPages[0].canvas.width, 2800, "Upgraded post-zoom page reaches native 2800px");
+  assert.ok(adaptiveEvents.includes("upgrade"), "Post-zoom upgrade must report 'upgrade' adaptive event");
+  zCtx.__zotMuPDFControl.uninstall();
+
+  // 24.2 reader-text-patch.js defers getProcessedData while scrolling is active and runs once scroll goes idle!
+  let scrollDeferredCalls = 0;
+  class ScrollDoc {
+    constructor() { this.numPages = 20; }
+    async getPageData() { return { chars: [] }; }
+    async getProcessedData() { scrollDeferredCalls++; return { pages: { 0: { overlays: [] } } }; }
+    async cleanup() {}
+  }
+  const rtScrollListeners = [];
+  const rtContainer = {
+    addEventListener(ev, fn) { if (ev === "scroll") rtScrollListeners.push(fn); },
+    removeEventListener() {},
+  };
+  const rtDoc = new ScrollDoc();
+  const rtCtx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    document: { getElementById: (id) => (id === "viewerContainer" ? rtContainer : null) },
+    window: null,
+  });
+  rtCtx.window = rtCtx;
+  rtCtx.__zotTurboIsScrolling = true;
+  rtCtx.__zotTurboLastScrollAt = Date.now();
+  rtCtx.PDFViewerApplication = { pdfDocument: rtDoc, pdfViewer: { container: rtContainer }, eventBus: { on() {}, off() {} } };
+  rtCtx.__zotTurboTextBridge = {
+    isEnabled: () => true,
+    getProcessedDataDelayMs: () => 20,
+    getProcessedDataMaxPages: () => 100,
+    getProcessedDataScrollIdleMs: () => 150,
+    getProcessedDataMaxScrollWaitMs: () => 2000,
+    isPdfjsCleanupEnabled: () => false,
+  };
+  loadScriptInContext("src/reader-text-patch.js", rtCtx);
+  const procPromise = rtDoc.getProcessedData({});
+  await new Promise((r) => setTimeout(r, 90));
+  assert.equal(scrollDeferredCalls, 0, "getProcessedData must NOT wake PDF.js Worker while user is actively scrolling!");
+  rtCtx.__zotTurboIsScrolling = false;
+  rtCtx.__zotTurboLastScrollAt = Date.now() - 200; // scroll idle >= 150ms!
+  await procPromise;
+  assert.equal(scrollDeferredCalls, 1, "getProcessedData must execute once scrolling settles idle");
+  rtCtx.__zotTurboUnpatchText();
+
+  // 24.3 ui-accel.js raises BOTH itemsView AND collectionsView overscan + injects & cleanly removes CSS pane containment
+  const itemsJsWin = { overscanCount: 2 };
+  const colJsWin = { overscanCount: 2 };
+  const uiStyles = new Map();
+  const uiWin = {
+    closed: false,
+    document: {
+      getElementById: (id) => uiStyles.get(id) || null,
+      createElementNS: (_ns, tag) => {
+        const el = { tagName: tag.toUpperCase(), id: "", textContent: "", isConnected: true, remove() { this.isConnected = false; uiStyles.delete(this.id); } };
+        return el;
+      },
+      head: { appendChild(el) { if (el.id) uiStyles.set(el.id, el); } },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    Zotero_Tabs: { selectedType: "library" },
+    ZoteroPane: {
+      itemSelected: async () => true,
+      itemsView: { tree: { _jsWindow: itemsJsWin } },
+      collectionsView: { tree: { _jsWindow: colJsWin } },
+    },
+  };
+  const uiCtx2 = vm.createContext({
+    Zotero: { getMainWindows: () => [uiWin], Notifier: { registerObserver: () => 1, unregisterObserver() {} } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }) },
+  });
+  loadScriptInContext("src/ui-accel.js", uiCtx2);
+  const uiAccel2 = new uiCtx2.ZotTurboUIAccel.UIAccelerator({
+    getPref: (k, d) => (k === "itemTreeOverscan" ? 8 : d),
+  });
+  uiAccel2.init();
+  assert.equal(itemsJsWin.overscanCount, 8, "itemsView overscanCount raised to 8");
+  assert.equal(colJsWin.overscanCount, 8, "collectionsView overscanCount raised to 8");
+  const containStyle = uiStyles.get("zot-turbo-ui-contain-style");
+  assert.ok(containStyle && containStyle.textContent.includes("#zotero-collections-pane") && containStyle.textContent.includes("contain: layout style"), "Main UI pane containment CSS injected");
+  uiAccel2.shutdown();
+  assert.equal(itemsJsWin.overscanCount, 2, "itemsView overscanCount restored cleanly");
+  assert.equal(colJsWin.overscanCount, 2, "collectionsView overscanCount restored cleanly");
+  assert.equal(uiStyles.size, 0, "Main UI pane containment CSS removed cleanly on shutdown");
+
+  // 24.4 Sidebar thumbnail frame coalescing batches burst renders into 1 array clone + 1 _onUpdate, and capsule tooltip renders Adaptive HiDPI telemetry!
+  let thumbUpdateCalls = 0;
+  let sliceCalls = 0;
+  const mockThumbArr = new Array(20).fill(null);
+  const origSlice = mockThumbArr.slice.bind(mockThumbArr);
+  mockThumbArr.slice = function () { sliceCalls++; return origSlice(); };
+  const rawThumbs = {
+    _thumbnails: mockThumbArr,
+    _renderQueue: { concurrency: 1 },
+    _render: async () => {},
+    _onUpdate: () => { thumbUpdateCalls++; },
+  };
+  const rhCtx5 = vm.createContext({
+    Zotero: {
+      Reader: { _readers: [] },
+      Items: { getAsync: async () => null },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      File: { getResourceAsync: async () => "" },
+      debug() {},
+      logError() {},
+    },
+    Services: { wm: { getMostRecentWindow: () => null } },
+    Components: { utils: { cloneInto: (x) => x, exportFunction: (f) => f, unwaiveXrays: (x) => x } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+  });
+  loadScriptInContext("src/reader-hook.js", rhCtx5);
+  const mockEngine5 = {
+    workerCount: 2,
+    onStatsChange: () => () => {},
+    isEnabled: () => true,
+    isReady: () => true,
+    getConfig: () => ({ renderThumbnails: true, adaptiveHiDPI: true }),
+    renderThumb: async (_k, { pageIndex }) => ({ buf: new ArrayBuffer(4 * 4 * 4), width: 4, height: 4, renderMs: 1.5, pageIndex }),
+    log() {},
+  };
+  const rh5 = new rhCtx5.ZotMuPDFReaderHook.ReaderHook({ pluginID: "zt", rootURI: "file:///", engineClient: mockEngine5 });
+  rh5._encodeThumbJpegAsync = async () => "data:image/jpeg;base64,AA==";
+  const fakeIframeWin = { closed: false, devicePixelRatio: 2, Promise };
+  const fakeState = { iframeWin: fakeIframeWin, filePath: "C:\\book.pdf", thumbHooks: new Set(), viewStatsHooks: new Set(), viewerEntries: new Set() };
+  const fakePv = { _annotations: [] };
+  rh5._patchThumbnailsInstance(fakeState, fakePv, rawThumbs);
+  await Promise.all([rawThumbs._render(0), rawThumbs._render(1), rawThumbs._render(2), rawThumbs._render(3)]);
+  assert.equal(thumbUpdateCalls, 0, "Burst thumbnail completions coalesce until 16ms frame batch");
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(sliceCalls, 1, "4 burst thumbnails must clone _thumbnails array only ONCE");
+  assert.equal(thumbUpdateCalls, 1, "4 burst thumbnails must trigger _onUpdate only ONCE");
+  assert.equal(rawThumbs._thumbnails[0].pageIndex, 0);
+  assert.equal(rawThumbs._thumbnails[3].pageIndex, 3);
+
+  // Check capsule tooltip renders live Adaptive HiDPI telemetry!
+  const mockBtn = { isConnected: true, title: "" };
+  const mockRec = {
+    doc: { defaultView: { closed: false } },
+    btn: mockBtn,
+    dot: { style: {} },
+    nameEl: { textContent: "" },
+    metricEl: { textContent: "" },
+  };
+  rh5._applyButtonState(mockRec, {
+    enabled: true,
+    ready: true,
+    adaptiveHiDPI: true,
+    lastAdaptiveTier: "unlimited",
+    adaptiveUpgrades: 7,
+    adaptiveDemotes: 5,
+    totalRenders: 10,
+    pixHits: 6,
+    lastE2EMs: 8,
+    lastRenderMs: 5,
+    lastPaintMs: 2,
+    avgE2EMs: 9,
+    fallbacks: 0,
+  });
+  assert.ok(mockBtn.title.includes("自适应 HiDPI: 当前 原画无限制 · 升级 7 次 · 显存回收 5 次"), `Capsule tooltip must show live adaptive HiDPI telemetry, got:\n${mockBtn.title}`);
+  rh5.shutdown();
+
+  console.log("  PASS: Zoom fast tier, scroll-idle getProcessedData, dual-tree overscan + CSS containment, 16ms thumbnail coalescing & capsule adaptive telemetry verified");
+}
+
+console.log("\n[ALL 24 VERIFICATION SUITES PASSED]");

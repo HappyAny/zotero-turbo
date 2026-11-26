@@ -149,6 +149,9 @@ var ZotMuPDFEngineClient = (function () {
         thumbCount: 0,
         thumbLastMs: 0,
         lastFallbackReason: "",
+        adaptiveUpgrades: 0,
+        adaptiveDemotes: 0,
+        lastAdaptiveTier: "",
       };
       this._listeners = new Set();
     }
@@ -195,6 +198,7 @@ var ZotMuPDFEngineClient = (function () {
       return {
         enabled: this.isEnabled(),
         ready: this.isReady(),
+        adaptiveHiDPI: this.getConfig().adaptiveHiDPI,
         mupdfVersion: this.mupdfVersion,
         fgWorkers: this.workerCount,
         workers: this.workerCount + this.bgWorkerCount,
@@ -231,6 +235,8 @@ var ZotMuPDFEngineClient = (function () {
       const adaptiveSlowDwellMs = Number.isFinite(rawSlowDwell) && rawSlowDwell >= 140 ? rawSlowDwell : 400;
       const rawFastDwell = Number(getPref("adaptiveFastDwellMs", 1200));
       const adaptiveFastDwellMs = Number.isFinite(rawFastDwell) && rawFastDwell >= adaptiveSlowDwellMs ? rawFastDwell : 1200;
+      const rawZoomDwell = Number(getPref("adaptiveZoomDwellMs", 250));
+      const adaptiveZoomDwellMs = Number.isFinite(rawZoomDwell) && rawZoomDwell >= 80 ? rawZoomDwell : 250;
       return {
         renderThumbnails: !!getPref("renderThumbnails", true),
         aaLevel: Number(getPref("aaLevel", 8)) || 8,
@@ -240,6 +246,7 @@ var ZotMuPDFEngineClient = (function () {
         maxPageMegapixels,
         adaptiveSlowDwellMs,
         adaptiveFastDwellMs,
+        adaptiveZoomDwellMs,
         liteOverlayBlend: !!getPref("liteOverlayBlend", true),
         longDocCssOpt: !!getPref("longDocCssOpt", true),
         deferTextLayerOnScroll: !!getPref("deferTextLayerOnScroll", true),
@@ -888,6 +895,22 @@ var ZotMuPDFEngineClient = (function () {
       this.stats.fallbacks++;
       this.stats.lastFallbackReason = String(reason || "");
       this.log("Fallback to PDF.js:", reason);
+      this._emitStats();
+    }
+
+    reportAdaptiveEvent(kind) {
+      if (kind === "upgrade") {
+        this.stats.adaptiveUpgrades++;
+        this.stats.lastAdaptiveTier = "unlimited";
+      } else if (kind === "demote") {
+        this.stats.adaptiveDemotes++;
+      } else if (kind === "fast") {
+        this.stats.lastAdaptiveTier = "fast";
+      } else if (kind === "unlimited") {
+        this.stats.lastAdaptiveTier = "unlimited";
+      } else {
+        return;
+      }
       this._emitStats();
     }
 

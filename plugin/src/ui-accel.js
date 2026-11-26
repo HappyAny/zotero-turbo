@@ -3,6 +3,7 @@
 
 var ZotTurboUIAccel = (function () {
   const { setTimeout, clearTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+  const CONTAIN_STYLE_ID = "zot-turbo-ui-contain-style";
 
   class UIAccelerator {
     constructor({ getPref }) {
@@ -15,6 +16,8 @@ var ZotTurboUIAccel = (function () {
         immediateSelections: 0,
         coalescedSelections: 0,
         activeOverscan: 2,
+        activeCollectionsOverscan: 2,
+        paneContainmentActive: false,
         attachedWindows: 0,
       };
     }
@@ -58,6 +61,9 @@ var ZotTurboUIAccel = (function () {
         lastInvokeAt: 0,
         origOverscan: null,
         patchedJsWin: null,
+        origColOverscan: null,
+        patchedColJsWin: null,
+        containStyleEl: null,
         overscanRetryTimer: null,
         overscanTries: 0,
         onUnload: null,
@@ -150,8 +156,9 @@ var ZotTurboUIAccel = (function () {
         pane.itemSelected = wrappedItemSelected;
       }
 
-      // 2. Apply smart virtualized-table overscan for 120Hz smooth scrolling
+      // 2. Apply smart virtualized-table overscan (items + collections) & pane CSS containment for 120Hz scrolling
       this._applyOverscanToWindow(win, state);
+      this._applyPaneContainment(win, state);
 
       state.onUnload = () => this.detachWindow(win);
       try {
@@ -159,9 +166,55 @@ var ZotTurboUIAccel = (function () {
       } catch {}
     }
 
+    _applyPaneContainment(win, state) {
+      if (this._destroyed || !win || win.closed || !state) return false;
+      const enabled = !!this.getPref("uiPaneContainEnabled", true);
+      const doc = win.document;
+      if (!doc) return false;
+      const existing = state.containStyleEl || doc.getElementById?.(CONTAIN_STYLE_ID) || null;
+      if (!enabled) {
+        if (existing) {
+          try {
+            existing.remove();
+          } catch {}
+        }
+        state.containStyleEl = null;
+        this.stats.paneContainmentActive = false;
+        return false;
+      }
+      if (existing && existing.isConnected !== false) {
+        state.containStyleEl = existing;
+        this.stats.paneContainmentActive = true;
+        return true;
+      }
+      try {
+        const styleEl =
+          typeof doc.createElementNS === "function"
+            ? doc.createElementNS("http://www.w3.org/1999/xhtml", "style")
+            : typeof doc.createElement === "function"
+              ? doc.createElement("style")
+              : null;
+        if (!styleEl) return false;
+        styleEl.id = CONTAIN_STYLE_ID;
+        styleEl.textContent =
+          "#zotero-collections-pane, #zotero-items-pane, #zotero-item-pane { contain: layout style; }";
+        const host = doc.head || doc.documentElement;
+        if (host && typeof host.appendChild === "function") {
+          host.appendChild(styleEl);
+          state.containStyleEl = styleEl;
+          this.stats.paneContainmentActive = true;
+          return true;
+        }
+      } catch {}
+      return false;
+    }
+
     _applyOverscanToWindow(win, state) {
       if (this._destroyed || !win || win.closed || !state) return false;
       const targetOverscan = Math.max(2, Math.min(16, Number(this.getPref("itemTreeOverscan", 6)) || 6));
+      let itemsOk = false;
+      let colOk = false;
+
       const jsWin = win.ZoteroPane?.itemsView?.tree?._jsWindow || null;
       if (jsWin && typeof jsWin.overscanCount === "number") {
         if (state.patchedJsWin && state.patchedJsWin !== jsWin && state.origOverscan != null) {
@@ -175,13 +228,34 @@ var ZotTurboUIAccel = (function () {
         }
         jsWin.overscanCount = targetOverscan;
         this.stats.activeOverscan = targetOverscan;
+        itemsOk = true;
+      }
+
+      const colJsWin = win.ZoteroPane?.collectionsView?.tree?._jsWindow || null;
+      if (colJsWin && typeof colJsWin.overscanCount === "number") {
+        if (state.patchedColJsWin && state.patchedColJsWin !== colJsWin && state.origColOverscan != null) {
+          try {
+            state.patchedColJsWin.overscanCount = state.origColOverscan;
+          } catch {}
+        }
+        if (state.patchedColJsWin !== colJsWin) {
+          state.patchedColJsWin = colJsWin;
+          state.origColOverscan = colJsWin.overscanCount;
+        }
+        colJsWin.overscanCount = targetOverscan;
+        this.stats.activeCollectionsOverscan = targetOverscan;
+        colOk = true;
+      }
+
+      const needsColRetry = !!win.ZoteroPane?.collectionsView && !colOk;
+      if (itemsOk && !needsColRetry) {
         if (state.overscanRetryTimer) {
           clearTimeout(state.overscanRetryTimer);
           state.overscanRetryTimer = null;
         }
         return true;
       }
-      // ItemsView mounts asynchronously right after startup: bounded one-shot retry (max 10 tries, zero idle polling)
+      // Views mount asynchronously right after startup: bounded one-shot retry (max 10 tries, zero idle polling)
       if (!state.overscanRetryTimer && state.overscanTries < 10) {
         state.overscanTries++;
         state.overscanRetryTimer = setTimeout(() => {
@@ -189,7 +263,7 @@ var ZotTurboUIAccel = (function () {
           this._applyOverscanToWindow(win, state);
         }, 400);
       }
-      return false;
+      return itemsOk;
     }
 
     applySettings() {
@@ -197,7 +271,9 @@ var ZotTurboUIAccel = (function () {
         if (!this._winStates.has(win)) {
           this.attachWindow(win);
         } else {
-          this._applyOverscanToWindow(win, this._winStates.get(win));
+          const st = this._winStates.get(win);
+          this._applyOverscanToWindow(win, st);
+          this._applyPaneContainment(win, st);
         }
       }
     }
@@ -231,6 +307,20 @@ var ZotTurboUIAccel = (function () {
           state.patchedJsWin.overscanCount = state.origOverscan;
         }
       } catch {}
+      try {
+        if (state.patchedColJsWin && state.origColOverscan != null) {
+          state.patchedColJsWin.overscanCount = state.origColOverscan;
+        }
+      } catch {}
+      try {
+        if (state.containStyleEl) {
+          state.containStyleEl.remove();
+          state.containStyleEl = null;
+        }
+      } catch {}
+      if (this._winStates.size === 0) {
+        this.stats.paneContainmentActive = false;
+      }
       try {
         if (win && !win.closed && state.onUnload) {
           win.removeEventListener("unload", state.onUnload);
