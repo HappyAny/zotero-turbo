@@ -16,6 +16,7 @@ var ZotTurboTabHibernator = (function () {
       onBackgroundSlim = null,
       startupAt = Date.now(),
       startupSweepDelayMs = 4000,
+      bgTrimDelayMs = 15000,
     }) {
       this.getPref = getPref;
       this.native = nativeClient;
@@ -23,10 +24,13 @@ var ZotTurboTabHibernator = (function () {
       this.onBackgroundSlim = onBackgroundSlim;
       this._startupAt = Number(startupAt) || Date.now();
       this._startupSweepDelayMs = Math.max(0, Number(startupSweepDelayMs) || 0);
+      this._bgTrimDelayMs = Math.max(0, Number(bgTrimDelayMs) || 0);
       this._preserveSessionHookOnShutdown = false;
       this._origSetLastClosed = null;
       this._wrappedSetLastClosed = null;
       this._winStates = new Map(); // win -> { origUnloadUnusedTabs, cleanups: [] }
+      this._bgTrimTimers = new Map(); // tabID -> timeoutID
+      this._lastSelectedByWin = new WeakMap(); // win -> tabID
       this._sweepTimer = null;
       this._startupSweepTimer = null;
       this._memObserver = null;
@@ -41,6 +45,7 @@ var ZotTurboTabHibernator = (function () {
         lastHibernateCount: 0,
         memoryPressureHibernations: 0,
         autoSlimCount: 0,
+        backgroundTrims: 0,
         lastSweepAt: 0,
       };
     }
@@ -166,11 +171,14 @@ var ZotTurboTabHibernator = (function () {
         Services.obs.addObserver(this._memObserver, "memory-pressure");
       } catch {}
 
-      // Refresh visual unloaded indicators when tabs change
+      // Refresh visual unloaded indicators & schedule non-destructive GPU canvas trim on switched-away tabs
       this._notifierID = Zotero.Notifier.registerObserver(
         {
-          notify: (_event, type) => {
+          notify: (event, type) => {
             if (this._destroyed || type !== "tab") return;
+            if (event === "select") {
+              this._onTabSelectionChanged();
+            }
             setTimeout(() => {
               if (!this._destroyed) this.refreshAllTabIndicators();
             }, 80);
@@ -179,6 +187,74 @@ var ZotTurboTabHibernator = (function () {
         ["tab"],
         "zotero-turbo-tabs"
       );
+    }
+
+    _cancelBgTrim(tabID) {
+      const tid = this._bgTrimTimers.get(tabID);
+      if (tid) {
+        clearTimeout(tid);
+        this._bgTrimTimers.delete(tabID);
+      }
+    }
+
+    _scheduleBgTabTrim(win, tabID) {
+      if (this._destroyed || !tabID || tabID === "zotero-pane") return;
+      if (!this.getPref("trimBackgroundTabCanvas", true) || this._bgTrimDelayMs <= 0) return;
+      this._cancelBgTrim(tabID);
+      const timer = setTimeout(() => {
+        this._bgTrimTimers.delete(tabID);
+        if (this._destroyed || !win || win.closed) return;
+        if (!this.getPref("trimBackgroundTabCanvas", true)) return;
+        if (win.Zotero_Tabs?.selectedID === tabID) return;
+        try {
+          const readers = Zotero.Reader?._readers;
+          if (!Array.isArray(readers)) return;
+          const reader = readers.find(
+            (r) => r && r.tabID === tabID && !r._isUninitialized && !r._isTabClosed
+          );
+          if (!reader) return;
+          const internal = reader._internalReader;
+          let trimmed = false;
+          if (typeof internal?._primaryView?.trimMemory === "function") {
+            internal._primaryView.trimMemory();
+            trimmed = true;
+          } else if (typeof internal?.trimMemory === "function") {
+            internal.trimMemory();
+            trimmed = true;
+          }
+          if (typeof internal?._secondaryView?.trimMemory === "function") {
+            internal._secondaryView.trimMemory();
+            trimmed = true;
+          }
+          if (trimmed) {
+            this.stats.backgroundTrims++;
+            Zotero.debug(`[ZotTurbo] Trimmed off-screen GPU canvases on background tab ${tabID}`);
+          }
+        } catch {}
+      }, this._bgTrimDelayMs);
+      if (typeof timer === "object" && typeof timer.unref === "function") {
+        timer.unref();
+      }
+      this._bgTrimTimers.set(tabID, timer);
+    }
+
+    _onTabSelectionChanged() {
+      try {
+        for (const win of Zotero.getMainWindows()) {
+          if (!win || win.closed || !win.Zotero_Tabs) continue;
+          const curID = win.Zotero_Tabs.selectedID;
+          const prevID = this._lastSelectedByWin.get(win);
+          if (curID) {
+            this._cancelBgTrim(curID);
+          }
+          if (prevID && prevID !== curID && prevID !== "zotero-pane") {
+            this._scheduleBgTabTrim(win, prevID);
+          }
+          if (curID) {
+            this._lastSelectedByWin.set(win, curID);
+          }
+        }
+      } catch {}
     }
 
     attachWindow(win) {
@@ -191,6 +267,9 @@ var ZotTurboTabHibernator = (function () {
         cleanups: [],
       };
       this._winStates.set(win, state);
+      if (zTabs.selectedID) {
+        this._lastSelectedByWin.set(win, zTabs.selectedID);
+      }
 
       // Inject subtle visual indicator style for hibernated tabs
       const doc = win.document;
@@ -680,6 +759,10 @@ var ZotTurboTabHibernator = (function () {
         clearInterval(this._sweepTimer);
         this._sweepTimer = null;
       }
+      for (const tid of this._bgTrimTimers.values()) {
+        clearTimeout(tid);
+      }
+      this._bgTrimTimers.clear();
       if (this._memObserver) {
         try {
           Services.obs.removeObserver(this._memObserver, "memory-pressure");

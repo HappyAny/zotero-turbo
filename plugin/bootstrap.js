@@ -26,6 +26,7 @@ const ZOT_TURBO_DEFAULTS = {
   tabHibernateEnabled: true,
   startupSelectLibraryTab: true,
   startupHibernateBackgroundTabs: true,
+  trimBackgroundTabCanvas: true,
   tabHibernateMaxLoaded: 2,
   tabHibernateIdleMin: 10,
   tabHibernateNotes: false,
@@ -45,10 +46,11 @@ const ZOT_TURBO_DEFAULTS = {
   noteWebpQuality: 85,
   noteWebpMinKB: 64,
   noteWebpMaxDim: 2560,
-  // Module 7: Main UI Fluidity (ItemPane Selection Coalescing & 120Hz Virtualized Overscan)
+  // Module 7: Main UI & 4K Long-Paper Fluidity
   itemSelectCoalesceEnabled: true,
   itemSelectDebounceMs: 75,
   itemTreeOverscan: 6,
+  longDocScrollOpt: true,
   // Internal migration flag
   migratedLegacyMuPDF: false,
 };
@@ -60,10 +62,14 @@ const ZOT_MUPDF_DEFAULTS = {
   workers: 2,
   bgWorkers: 1,
   storeMB: 96,
-  pixCacheMB: 96,
+  pixCacheMB: 128,
   prerender: true,
   softwareCanvas: true,
   maxOutputScale: "",
+  maxPageMegapixels: "4.5",
+  liteOverlayBlend: true,
+  longDocCssOpt: true,
+  deferTextLayerOnScroll: true,
   debugLog: false,
 };
 
@@ -195,6 +201,7 @@ async function startup({ id, version, rootURI }) {
         pluginID: id,
         rootURI,
         engineClient: renderEngine,
+        getPref,
       });
     } else {
       Zotero.debug(

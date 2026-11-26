@@ -40,7 +40,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "manifest.json"), "utf8"));
   assert.equal(manifest.applications.zotero.id, "zotero-turbo@happyany.github.io");
-  assert.equal(manifest.version, "0.13.2");
+  assert.equal(manifest.version, "0.14.0");
   const bootSrc = fs.readFileSync(path.join(PLUGIN_DIR, "bootstrap.js"), "utf8");
   assert.ok(
     bootSrc.indexOf("await Zotero.initializationPromise;") < bootSrc.indexOf("const startupAt = Date.now();"),
@@ -59,6 +59,12 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(!xhtml.includes("<html:select"), "Do not use <html:select> in Zotero XUL preferences (popup fails); use XUL <menulist>!");
   assert.ok(xhtml.includes('<menulist id="zt-mupdf-aaLevel"'), "Expected native XUL <menulist> for aaLevel");
   assert.ok(xhtml.includes('<menulist id="zt-mupdf-maxOutputScale"'), "Expected native XUL <menulist> for maxOutputScale");
+  assert.ok(xhtml.includes('<menulist id="zt-mupdf-maxPageMegapixels"'), "Expected native XUL <menulist> for maxPageMegapixels");
+  assert.ok(xhtml.includes('id="zt-mupdf-liteOverlayBlend"'), "Expected liteOverlayBlend checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-mupdf-longDocCssOpt"'), "Expected longDocCssOpt checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-mupdf-deferTextLayerOnScroll"'), "Expected deferTextLayerOnScroll checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-trimBackgroundTabCanvas"'), "Expected trimBackgroundTabCanvas checkbox in preferences.xhtml");
+  assert.ok(xhtml.includes('id="zt-pref-longDocScrollOpt"'), "Expected longDocScrollOpt checkbox in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-btn-health-audit"'), "Expected health audit button in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-btn-vacuum-db"'), "Expected VACUUM button in preferences.xhtml");
   assert.ok(xhtml.includes('id="zt-btn-scan-note-png"'), "Expected scan note PNG button in preferences.xhtml");
@@ -84,7 +90,7 @@ console.log("=== [Check 1] Syntax, Manifest, XHTML & Binary checks ===");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_pdf_has_annots"), "native-worker.js must declare zot_turbo_pdf_has_annots");
   assert.ok(nativeWorkerSrc.includes("zot_turbo_os_trim_memory"), "native-worker.js must declare zot_turbo_os_trim_memory");
   assert.ok(fs.existsSync(path.join(PLUGIN_DIR, "bin/zotero-turbo-native-win-x64.dll")), "Missing compiled Win x64 DLL");
-  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.13.2 + XUL menulist + unified DLL verified`);
+  console.log(`  PASS: ${jsFiles.length} JS files parsed, manifest v0.14.0 + XUL menulist + unified DLL verified`);
 }
 
 console.log("=== [Check 2] Cross-platform ABI binary routing ===");
@@ -2457,4 +2463,254 @@ console.log("=== [Check 20] v0.13.2: Zero-Hijack Native Library Start While Pres
   console.log("  PASS: zero-hijack startupSelectLibraryTab, recently-clicked tab guard, silent migration & APP_SHUTDOWN verified");
 }
 
-console.log("\n[ALL 20 VERIFICATION SUITES PASSED]");
+console.log("=== [Check 21] v0.14.0: 4K 120Hz & Long-Paper Fluidity Suite ===");
+{
+  // 21.1 + 21.2 + 21.3: page-patch.js (4K maxPageMegapixels, CSS containment + liteOverlayBlend, scroll-settled TextLayer/StructTree)
+  const styleNodes = new Map();
+  const scrollListeners = [];
+  const classSet = new Set();
+  const containerEl = {
+    classList: {
+      add: (c) => classSet.add(c),
+      remove: (c) => classSet.delete(c),
+      has: (c) => classSet.has(c),
+    },
+    addEventListener(ev, fn) { if (ev === "scroll") scrollListeners.push(fn); },
+    removeEventListener(ev, fn) {
+      if (ev === "scroll") {
+        const idx = scrollListeners.indexOf(fn);
+        if (idx >= 0) scrollListeners.splice(idx, 1);
+      }
+    },
+  };
+  let origTextRenderCalls = 0;
+  let origStructRenderCalls = 0;
+  class MockTextLayer {
+    async render() { origTextRenderCalls++; return "text-ok"; }
+    cancel() {}
+  }
+  class MockStructTree {
+    async render() { origStructRenderCalls++; return "struct-ok"; }
+  }
+  class MockPdfPage {
+    constructor(n) { this.pageNumber = n; this._pageIndex = n - 1; }
+    getViewport() { return { width: 595, height: 842, transform: [1, 0, 0, -1, 0, 842] }; }
+    render() { return { promise: Promise.resolve() }; }
+  }
+  const tl1 = new MockTextLayer();
+  const tl2 = new MockTextLayer();
+  const st1 = new MockStructTree();
+  const st2 = new MockStructTree();
+  const mockPages = [
+    { id: 1, renderingState: 3, pdfPage: new MockPdfPage(1), textLayer: tl1, structTreeLayer: st1 },
+    { id: 2, renderingState: 3, pdfPage: new MockPdfPage(2), textLayer: tl2, structTreeLayer: st2 },
+  ];
+  const cfg4k = {
+    renderThumbnails: true,
+    aaLevel: 8,
+    softwareCanvas: true,
+    maxOutputScale: 1.5,
+    maxPageMegapixels: 4.5,
+    liteOverlayBlend: true,
+    longDocCssOpt: true,
+    deferTextLayerOnScroll: true,
+  };
+  const renderedPayloads = [];
+  const docEl = {
+    getElementById: (id) => (id === "viewerContainer" ? containerEl : styleNodes.get(id) || null),
+    createElement: (tag) => {
+      const el = { tagName: tag.toUpperCase(), id: "", textContent: "", remove() { styleNodes.delete(this.id); } };
+      return el;
+    },
+    head: { appendChild(el) { if (el.id) styleNodes.set(el.id, el); } },
+  };
+  const ppCtx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    performance: { now: () => Date.now() },
+    document: docEl,
+    window: null,
+  });
+  ppCtx.window = ppCtx;
+  ppCtx.PDFViewerApplication = {
+    pdfDocument: { getPage: async (n) => mockPages[n - 1].pdfPage },
+    pdfViewer: { container: containerEl, _pages: mockPages, _getVisiblePages: () => ({ ids: new Set([1]) }) },
+    eventBus: { on() {}, off() {} },
+    pdfRenderingQueue: { renderHighestPriority() {} },
+  };
+  ppCtx.__zotMuPDFBridge = {
+    isEnabled: () => true,
+    getConfig: () => ({ ...cfg4k }),
+    setPassword() {},
+    cancelRequest() {},
+    reportFallback() {},
+    reportMuPDFPaint() {},
+    reportTextLayerTiming() {},
+    reportPdfJsTiming() {},
+    renderPage(payloadJSON, _canvas, _ctx, _isCancelled, onPainted) {
+      renderedPayloads.push(JSON.parse(payloadJSON));
+      onPainted(2.0, "skia", 0);
+    },
+  };
+  loadScriptInContext("src/page-patch.js", ppCtx);
+
+  // Check injected 4K & long-doc CSS
+  const optStyle = styleNodes.get("zot-turbo-4k-style");
+  assert.ok(optStyle, "4K & long-doc optimization <style> must be injected");
+  assert.ok(optStyle.textContent.includes("contain: layout style"), "Must apply CSS layout containment on .page");
+  assert.ok(optStyle.textContent.includes("mix-blend-mode: normal !important"), "Must include liteOverlayBlend rules");
+
+  // Check 4K maxPageMegapixels cap: 2520x3255 (8.20 MP) -> <= 4.55 MP; 1200x1550 (1.86 MP) untouched
+  const canvas4k = { width: 2520, height: 3255, closest: () => null };
+  await mockPages[0].pdfPage.render({
+    canvas: canvas4k,
+    viewport: { width: 1680, height: 2170, transform: [2.82, 0, 0, -2.82, 0, 2170] },
+    transform: [1.5, 0, 0, 1.5, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.ok(canvas4k.width * canvas4k.height <= 4550000, `4K canvas must be capped <= 4.55 MP, got ${canvas4k.width}x${canvas4k.height}`);
+  assert.ok(canvas4k.width >= 1800, `4K canvas must stay crisp >= 1800px wide, got ${canvas4k.width}`);
+
+  const canvas1080 = { width: 1200, height: 1550, closest: () => null };
+  await mockPages[0].pdfPage.render({
+    canvas: canvas1080,
+    viewport: { width: 800, height: 1033, transform: [1.34, 0, 0, -1.34, 0, 1033] },
+    transform: [1.5, 0, 0, 1.5, 0, 0],
+    annotationMode: 1,
+  }).promise;
+  assert.equal(canvas1080.width, 1200, "1080p canvas (1.86 MP) must stay 100% native untouched");
+
+  // Check scroll-settled TextLayer & StructTree deferral
+  await tl1.render({});
+  assert.equal(origTextRenderCalls, 1, "When not scrolling, TextLayer renders immediately (0ms delay)");
+
+  // Trigger active scroll -> adds zot-turbo-scrolling class & defers textLayer/structTree
+  assert.equal(scrollListeners.length, 1, "Scroll watcher attached to viewerContainer");
+  scrollListeners[0]();
+  assert.ok(classSet.has("zot-turbo-scrolling"), "Active scroll must add zot-turbo-scrolling class");
+  const pDeferActive = tl1.render({});
+  const pDeferEvicted = tl2.render({});
+  const pStructEvicted = st2.render();
+  // Simulate page 2 getting evicted by _trimPageBuffer while user scrolled past it!
+  tl2.cancel();
+  mockPages[1].renderingState = 0;
+  assert.equal(origTextRenderCalls, 1, "During active scroll, textLayer must wait for scroll settle");
+  await Promise.all([pDeferActive, pDeferEvicted, pStructEvicted]);
+  assert.ok(!classSet.has("zot-turbo-scrolling"), "zot-turbo-scrolling must clear once scroll settles");
+  assert.equal(origTextRenderCalls, 2, "Only settled active page 1 rendered TextLayer; scrolled-past page 2 skipped!");
+  assert.equal(origStructRenderCalls, 0, "Scrolled-past page 2 skipped StructTreeLayer completely!");
+
+  // Dynamic pref toggle off removes injected <style>
+  cfg4k.longDocCssOpt = false;
+  cfg4k.liteOverlayBlend = false;
+  ppCtx.__zotMuPDFControl.applyRuntimeOpts();
+  assert.equal(styleNodes.has("zot-turbo-4k-style"), false, "Disabling CSS/blend prefs must remove style cleanly");
+
+  // Uninstall cleanly restores TextLayer & StructTree prototypes
+  ppCtx.__zotMuPDFControl.uninstall();
+  assert.equal(MockTextLayer.prototype.render.name, "render", "TextLayer.prototype.render restored");
+  assert.equal(MockStructTree.prototype.render.name, "render", "StructTree.prototype.render restored");
+
+  // 21.4: ReaderHook _updateViewStats 120Hz scroll coalescing
+  let viewStatsCalls = 0;
+  const mockViewerObj = { currentPageNumber: 10, currentScaleValue: "page-width", pagesCount: 867, scrollMode: 0, spreadMode: 0 };
+  const rawPvMock = {
+    _scrolling: true,
+    _iframeWindow: { PDFViewerApplication: { pdfViewer: mockViewerObj } },
+    _updateViewStats() { viewStatsCalls++; },
+  };
+  const origUpdateFn = rawPvMock._updateViewStats;
+  const rhCtx5 = vm.createContext({
+    Zotero: {
+      File: { getResourceAsync: async () => "" },
+      Reader: { _readers: [], registerEventListener() {}, unregisterEventListener() {} },
+      Notifier: { registerObserver: () => 1, unregisterObserver() {} },
+      debug() {},
+      logError() {},
+    },
+    Services: { wm: { getMostRecentWindow: () => null } },
+    Components: { utils: { exportFunction: (fn) => fn, cloneInto: (o) => o, unwaiveXrays: (o) => o } },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout }), now: () => Date.now() },
+  });
+  loadScriptInContext("src/reader-hook.js", rhCtx5);
+  const rh5 = new rhCtx5.ZotMuPDFReaderHook.ReaderHook({
+    pluginID: "zt",
+    rootURI: "file:///",
+    engineClient: { onStatsChange: () => () => {}, isEnabled: () => true, isReady: () => false, log() {} },
+    getPref: (k, d) => (k === "longDocScrollOpt" ? true : d),
+  });
+  const state5 = {
+    iframeWin: { closed: false },
+    reader: { _internalReader: { _primaryView: rawPvMock } },
+    viewStatsHooks: new Set(),
+  };
+  rh5._hookLongDocScrollViews(state5);
+  // Burst 20 scroll frames on same page -> coalesced into 1 immediate call
+  for (let i = 0; i < 20; i++) rawPvMock._updateViewStats();
+  assert.equal(viewStatsCalls, 1, "20 rapid same-page 120Hz scroll frames must coalesce into 1 immediate _updateViewStats call");
+  // Crossing to page 11 fires IMMEDIATELY (0ms lag!)
+  mockViewerObj.currentPageNumber = 11;
+  rawPvMock._updateViewStats();
+  assert.equal(viewStatsCalls, 2, "Crossing to a new page must update viewStats immediately");
+  // Clean restore on shutdown
+  rh5.shutdown();
+  assert.equal(rawPvMock._updateViewStats, origUpdateFn, "PDFView._updateViewStats restored cleanly on shutdown");
+
+  // 21.5: TabHibernator background active-tab GPU canvas trim (trimBackgroundTabCanvas)
+  let notifyTabFn = null;
+  let trim1Calls = 0;
+  let trim2Calls = 0;
+  const mockWin5 = {
+    closed: false,
+    document: { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], createElementNS: () => ({ remove() {} }), head: { appendChild() {} } },
+    addEventListener() {},
+    removeEventListener() {},
+    Zotero_Tabs: {
+      _tabs: [{ id: "zotero-pane", type: "library" }, { id: "pdf-1", type: "reader" }, { id: "pdf-2", type: "reader" }],
+      selectedID: "pdf-1",
+      canUnload: () => true,
+      unload() {},
+      unloadUnusedTabs() {},
+    },
+  };
+  const thCtx5 = vm.createContext({
+    Zotero: {
+      getMainWindows: () => [mockWin5],
+      Date: { getUnixTimestamp: () => 2000 },
+      Notifier: { registerObserver: (o) => { notifyTabFn = o.notify; return 1; }, unregisterObserver() {} },
+      Items: { getAsync: async () => null },
+      Reader: {
+        _readers: [
+          { tabID: "pdf-1", _isUninitialized: false, _isTabClosed: false, _internalReader: { _primaryView: { trimMemory() { trim1Calls++; } } } },
+          { tabID: "pdf-2", _isUninitialized: false, _isTabClosed: false, _internalReader: { _primaryView: { trimMemory() { trim2Calls++; } } } },
+        ],
+      },
+      debug() {},
+    },
+    Services: { obs: { addObserver() {}, removeObserver() {} }, focus: { activeWindow: mockWin5 } },
+    Components: { classes: {}, interfaces: {} },
+    ChromeUtils: { importESModule: () => ({ setTimeout, clearTimeout, setInterval, clearInterval }) },
+  });
+  loadScriptInContext("src/tab-hibernator.js", thCtx5);
+  const hib5 = new thCtx5.ZotTurboTabHibernator.TabHibernator({
+    getPref: (k, d) => (k === "trimBackgroundTabCanvas" ? true : d),
+    nativeClient: { trim: async () => {}, evictPath: async () => {} },
+    startupSweepDelayMs: 0,
+    bgTrimDelayMs: 40,
+  });
+  hib5.init();
+  // Switch pdf-1 -> pdf-2, then quickly switch back before 40ms -> trim cancelled!
+  mockWin5.Zotero_Tabs.selectedID = "pdf-2";
+  notifyTabFn("select", "tab");
+  mockWin5.Zotero_Tabs.selectedID = "pdf-1";
+  notifyTabFn("select", "tab");
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(trim1Calls, 0, "Quickly switching back to pdf-1 must cancel its background canvas trim");
+  assert.equal(trim2Calls, 1, "pdf-2 stayed in background >40ms so its off-screen canvases were trimmed");
+  assert.equal(hib5.stats.backgroundTrims, 1);
+  hib5.shutdown();
+
+  console.log("  PASS: 4K maxPageMegapixels, CSS containment, blend-free scroll, deferred TextLayer/StructTree, 120Hz ViewStats coalescing & bg canvas trim verified");
+}
+
+console.log("\n[ALL 21 VERIFICATION SUITES PASSED]");

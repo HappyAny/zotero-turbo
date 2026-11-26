@@ -28,6 +28,14 @@
   let origPageRender = null;
   let wrappedPageRender = null;
   let patchedPageProto = null;
+  let patchedTextLayerProto = null;
+  let origTextLayerRender = null;
+  let wrappedTextLayerRender = null;
+  let origTextLayerCancel = null;
+  let wrappedTextLayerCancel = null;
+  let patchedStructTreeProto = null;
+  let origStructTreeRender = null;
+  let wrappedStructTreeRender = null;
   let nextReqId = 1;
   let docLoadedListener = null;
   let pageRenderedListener = null;
@@ -35,7 +43,192 @@
   let attachRetryTimer = null;
   let attachRetryTries = 0;
 
+  // 4K 120Hz & long-document runtime optimizations (CSS isolation, blend-free scroll, scroll-settled textLayer)
+  const OPT_STYLE_ID = "zot-turbo-4k-style";
+  const SCROLL_CLASS = "zot-turbo-scrolling";
+  const SCROLL_SETTLE_MS = 140;
+  let scrollContainer = null;
+  let scrollListener = null;
+  let scrollIdleTimer = null;
+  let isScrolling = false;
+  let scrollSettleWaiters = [];
+
   const pageRenderEndTimes = new Map(); // pageNumber -> performance.now()
+
+  function flushScrollWaiters() {
+    if (scrollSettleWaiters.length === 0) return;
+    const waiters = scrollSettleWaiters.splice(0, scrollSettleWaiters.length);
+    for (const resolve of waiters) {
+      try {
+        resolve();
+      } catch {}
+    }
+  }
+
+  function waitUntilScrollSettles() {
+    if (!isScrolling) return Promise.resolve();
+    return new Promise(resolve => {
+      scrollSettleWaiters.push(resolve);
+    });
+  }
+
+  function applyRuntimeOpts() {
+    try {
+      const cfg = bridge.getConfig?.() || {};
+      const cssOpt = cfg.longDocCssOpt !== false;
+      const liteBlend = cfg.liteOverlayBlend !== false;
+      const existing = document.getElementById(OPT_STYLE_ID);
+      if (!cssOpt && !liteBlend) {
+        if (existing) existing.remove();
+        return;
+      }
+      const parts = [];
+      if (cssOpt) {
+        parts.push(
+          `.pdfViewer .page { contain: layout style; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14) !important; }`,
+          `.pdfViewer .canvasWrapper { contain: strict; }`,
+          `.pdfViewer .textLayer { contain: layout style paint; }`
+        );
+      }
+      if (liteBlend) {
+        parts.push(
+          `.annotationOverlay .overlayRect[style*="118, 198, 255"],`,
+          `.annotationOverlay .overlayRect[style*="#76c6ff"],`,
+          `.annotationOverlay .overlayRect[style*="70, 177, 255"],`,
+          `.annotationOverlay .overlayRect[style*="#46b1ff"] { mix-blend-mode: normal !important; }`,
+          `#viewerContainer.${SCROLL_CLASS} .annotationOverlay .overlayRect { mix-blend-mode: normal !important; }`
+        );
+      }
+      const cssText = parts.join("\n");
+      if (existing) {
+        if (existing.textContent !== cssText) existing.textContent = cssText;
+      } else if (document.head || document.documentElement) {
+        const el = document.createElement("style");
+        el.id = OPT_STYLE_ID;
+        el.textContent = cssText;
+        (document.head || document.documentElement).appendChild(el);
+      }
+    } catch {}
+  }
+
+  function attachScrollWatcher() {
+    try {
+      const container =
+        window.PDFViewerApplication?.pdfViewer?.container || document.getElementById("viewerContainer");
+      if (!container || container === scrollContainer) return;
+      if (scrollContainer && scrollListener) {
+        try {
+          scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+          scrollContainer.classList?.remove(SCROLL_CLASS);
+        } catch {}
+      }
+      scrollContainer = container;
+      scrollListener = () => {
+        if (!isScrolling) {
+          isScrolling = true;
+          try {
+            const cfg = bridge.getConfig?.() || {};
+            if (cfg.liteOverlayBlend !== false) {
+              scrollContainer.classList?.add(SCROLL_CLASS);
+            }
+          } catch {}
+        }
+        if (scrollIdleTimer) {
+          clearTimeout(scrollIdleTimer);
+        }
+        scrollIdleTimer = setTimeout(() => {
+          scrollIdleTimer = null;
+          isScrolling = false;
+          try {
+            scrollContainer?.classList?.remove(SCROLL_CLASS);
+          } catch {}
+          flushScrollWaiters();
+        }, SCROLL_SETTLE_MS);
+      };
+      scrollContainer.addEventListener("scroll", scrollListener, { passive: true });
+    } catch {}
+  }
+
+  function isActivePageLayer(layerObj, propName) {
+    try {
+      const pages = window.PDFViewerApplication?.pdfViewer?._pages;
+      if (!Array.isArray(pages) || pages.length === 0) return true;
+      for (let i = 0; i < pages.length; i++) {
+        const pv = pages[i];
+        if (pv && pv[propName] === layerObj) {
+          // renderingState === 0 means INITIAL (page was reset/destroyed while scrolling past)
+          return pv.renderingState !== 0;
+        }
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  function patchTextAndStructPrototypes() {
+    try {
+      const pages = window.PDFViewerApplication?.pdfViewer?._pages;
+      if (!Array.isArray(pages)) return;
+      for (let i = 0; i < pages.length; i++) {
+        const pv = pages[i];
+        if (!pv) continue;
+        if (!patchedTextLayerProto && pv.textLayer) {
+          const proto = Object.getPrototypeOf(pv.textLayer);
+          if (proto && typeof proto.render === "function") {
+            patchedTextLayerProto = proto;
+            if (typeof proto.cancel === "function") {
+              origTextLayerCancel = proto.cancel;
+              const capturedCancel = origTextLayerCancel;
+              wrappedTextLayerCancel = function zotTurboTextLayerCancel(...args) {
+                this._zotTurboCancelled = true;
+                return capturedCancel.apply(this, args);
+              };
+              proto.cancel = wrappedTextLayerCancel;
+            }
+            origTextLayerRender = proto.render;
+            const capturedRender = origTextLayerRender;
+            wrappedTextLayerRender = async function zotTurboTextLayerRender(...args) {
+              this._zotTurboCancelled = false;
+              const cfg = bridge.getConfig?.() || {};
+              if (isScrolling && bridge.isEnabled() && cfg.deferTextLayerOnScroll !== false) {
+                await waitUntilScrollSettles();
+                if (
+                  this._zotTurboCancelled ||
+                  !window.__zotMuPDFPatched ||
+                  !isActivePageLayer(this, "textLayer")
+                ) {
+                  return;
+                }
+              }
+              return capturedRender.apply(this, args);
+            };
+            proto.render = wrappedTextLayerRender;
+          }
+        }
+        if (!patchedStructTreeProto && pv.structTreeLayer) {
+          const proto = Object.getPrototypeOf(pv.structTreeLayer);
+          if (proto && typeof proto.render === "function") {
+            patchedStructTreeProto = proto;
+            origStructTreeRender = proto.render;
+            const capturedStructRender = origStructTreeRender;
+            wrappedStructTreeRender = async function zotTurboStructTreeRender(...args) {
+              const cfg = bridge.getConfig?.() || {};
+              if (isScrolling && bridge.isEnabled() && cfg.deferTextLayerOnScroll !== false) {
+                await waitUntilScrollSettles();
+                if (!window.__zotMuPDFPatched || !isActivePageLayer(this, "structTreeLayer")) {
+                  return null;
+                }
+              }
+              return capturedStructRender.apply(this, args);
+            };
+            proto.render = wrappedStructTreeRender;
+          }
+        }
+        if (patchedTextLayerProto && patchedStructTreeProto) break;
+      }
+    } catch {}
+  }
 
   function invert2D(m) {
     const [a, b, c, d, e, f] = m;
@@ -181,24 +374,32 @@
           ? multiply2D(params.transform, params.viewport.transform)
           : params.viewport.transform;
 
-        // Optional user-configured maxOutputScale cap (default 0 = native full HiDPI crispness).
+        // Optional user-configured maxOutputScale & 4K maxPageMegapixels cap.
         // Applies only to full main-page renders (never zoomed PDFDetailView tiles or thumbnails),
         // keeping CSS page dimensions, highlights, and textLayer coordinates 100% identical!
         let resizedForMaxScale = false;
         const maxOutScale = Number(cfg.maxOutputScale) || 0;
-        if (
-          maxOutScale >= 0.75 &&
-          isMainPage &&
-          !ctxAlreadyProvided &&
-          params.transform &&
-          Math.abs(params.transform[4]) < 1 &&
-          Math.abs(params.transform[5]) < 1
-        ) {
-          const curScale = Math.hypot(params.transform[0], params.transform[1]);
-          if (Number.isFinite(curScale) && curScale > maxOutScale + 0.02) {
-            const ratio = maxOutScale / curScale;
-            const newW = Math.max(1, Math.round(origWidth * ratio));
-            const newH = Math.max(1, Math.round(origHeight * ratio));
+        const maxPageMP = Number(cfg.maxPageMegapixels) || 0;
+        const isFullPageTransform =
+          !params.transform || (Math.abs(params.transform[4]) < 1 && Math.abs(params.transform[5]) < 1);
+        if (isMainPage && !ctxAlreadyProvided && isFullPageTransform && (maxOutScale >= 0.75 || maxPageMP >= 1.5)) {
+          let downRatio = 1;
+          if (maxOutScale >= 0.75 && params.transform) {
+            const curScale = Math.hypot(params.transform[0], params.transform[1]);
+            if (Number.isFinite(curScale) && curScale > maxOutScale + 0.02) {
+              downRatio = Math.min(downRatio, maxOutScale / curScale);
+            }
+          }
+          if (maxPageMP >= 1.5) {
+            const maxPixels = maxPageMP * 1000000;
+            const origPixels = origWidth * origHeight;
+            if (origPixels > maxPixels * 1.03) {
+              downRatio = Math.min(downRatio, Math.sqrt(maxPixels / origPixels));
+            }
+          }
+          if (downRatio < 0.99) {
+            const newW = Math.max(1, Math.round(origWidth * downRatio));
+            const newH = Math.max(1, Math.round(origHeight * downRatio));
             if (newW < origWidth && newH < origHeight) {
               targetCanvas.width = newW;
               targetCanvas.height = newH;
@@ -499,18 +700,25 @@
     if (app.pdfDocument) {
       hookPdfDocument(app.pdfDocument);
     }
+    applyRuntimeOpts();
+    attachScrollWatcher();
+    patchTextAndStructPrototypes();
 
     const bindBus = () => {
       if (!app.eventBus || docLoadedListener) return;
       docLoadedListener = () => {
+        applyRuntimeOpts();
+        attachScrollWatcher();
         if (app.pdfDocument) {
           hookPdfDocument(app.pdfDocument);
         }
+        patchTextAndStructPrototypes();
       };
 
       // Decouple PDFRenderingQueue from PDF.js textLayer/annotationLayer stalls:
       // kick renderHighestPriority() as soon as MuPDF finishes painting the canvas!
       pageRenderedListener = ev => {
+        patchTextAndStructPrototypes();
         if (!ev || ev.error || ev.cssTransform) return;
         if (ev.pageNumber != null && !ev.isDetailView) {
           pageRenderEndTimes.set(ev.pageNumber, performance.now());
@@ -545,9 +753,12 @@
     } else if (app.initializedPromise) {
       app.initializedPromise.then(() => {
         bindBus();
+        applyRuntimeOpts();
+        attachScrollWatcher();
         if (app.pdfDocument) {
           hookPdfDocument(app.pdfDocument);
         }
+        patchTextAndStructPrototypes();
       });
     }
     return true;
@@ -598,7 +809,35 @@
         clearTimeout(attachRetryTimer);
         attachRetryTimer = null;
       }
+      if (scrollIdleTimer) {
+        clearTimeout(scrollIdleTimer);
+        scrollIdleTimer = null;
+      }
+      isScrolling = false;
+      flushScrollWaiters();
+      if (scrollContainer && scrollListener) {
+        try {
+          scrollContainer.removeEventListener("scroll", scrollListener, { passive: true });
+          scrollContainer.classList?.remove(SCROLL_CLASS);
+        } catch {}
+      }
+      scrollContainer = null;
+      scrollListener = null;
+      try {
+        document.getElementById(OPT_STYLE_ID)?.remove();
+      } catch {}
       pageRenderEndTimes.clear();
+      if (patchedTextLayerProto) {
+        if (origTextLayerRender && patchedTextLayerProto.render === wrappedTextLayerRender) {
+          patchedTextLayerProto.render = origTextLayerRender;
+        }
+        if (origTextLayerCancel && patchedTextLayerProto.cancel === wrappedTextLayerCancel) {
+          patchedTextLayerProto.cancel = origTextLayerCancel;
+        }
+      }
+      if (patchedStructTreeProto && origStructTreeRender && patchedStructTreeProto.render === wrappedStructTreeRender) {
+        patchedStructTreeProto.render = origStructTreeRender;
+      }
       if (patchedPageProto && origPageRender && patchedPageProto.render === wrappedPageRender) {
         patchedPageProto.render = origPageRender;
       }
@@ -626,6 +865,14 @@
     patchedPageProto = null;
     origPageRender = null;
     wrappedPageRender = null;
+    patchedTextLayerProto = null;
+    origTextLayerRender = null;
+    wrappedTextLayerRender = null;
+    origTextLayerCancel = null;
+    wrappedTextLayerCancel = null;
+    patchedStructTreeProto = null;
+    origStructTreeRender = null;
+    wrappedStructTreeRender = null;
     patchedDocProto = null;
     origGetPage = null;
     wrappedGetPage = null;
@@ -641,6 +888,7 @@
 
   window.__zotMuPDFControl = {
     ensureAttached,
+    applyRuntimeOpts,
     refreshAllPages,
     uninstall,
   };

@@ -2,10 +2,19 @@
 "use strict";
 
 var ZotTurboPrefs = (function () {
-  const MUPDF_BOOL_KEYS = ["enabled", "renderThumbnails", "softwareCanvas", "prerender"];
+  const MUPDF_BOOL_KEYS = [
+    "enabled",
+    "renderThumbnails",
+    "softwareCanvas",
+    "prerender",
+    "liteOverlayBlend",
+    "longDocCssOpt",
+    "deferTextLayerOnScroll",
+  ];
   const MUPDF_MENULIST_INT_KEYS = ["aaLevel"];
   const MUPDF_INT_KEYS = ["workers", "bgWorkers", "storeMB", "pixCacheMB"];
   const MUPDF_MENULIST_SCALE_KEY = "maxOutputScale";
+  const MUPDF_MENULIST_MP_KEY = "maxPageMegapixels";
 
   function setMenulistValue(el, rawVal) {
     if (!el) return;
@@ -49,6 +58,7 @@ var ZotTurboPrefs = (function () {
     "tabHibernateEnabled",
     "startupSelectLibraryTab",
     "startupHibernateBackgroundTabs",
+    "trimBackgroundTabCanvas",
     "tabHibernateNotes",
     "autoBackgroundSlimEnabled",
     "searchNativeScanEnabled",
@@ -58,6 +68,7 @@ var ZotTurboPrefs = (function () {
     "sqliteTuneEnabled",
     "noteWebpEnabled",
     "itemSelectCoalesceEnabled",
+    "longDocScrollOpt",
   ];
 
   const INT_KEYS = [
@@ -109,6 +120,10 @@ var ZotTurboPrefs = (function () {
     {
       const scaleVal = String(p.getMuPDFPref(MUPDF_MENULIST_SCALE_KEY) || "");
       setMenulistValue($(`zt-mupdf-${MUPDF_MENULIST_SCALE_KEY}`), scaleVal || "native");
+    }
+    {
+      const mpVal = String(p.getMuPDFPref(MUPDF_MENULIST_MP_KEY) || "");
+      setMenulistValue($(`zt-mupdf-${MUPDF_MENULIST_MP_KEY}`), mpVal || "native");
     }
 
     for (const k of BOOL_KEYS) {
@@ -377,6 +392,8 @@ var ZotTurboPrefs = (function () {
           p.renderHook?.refreshAllViewers?.(true);
         } else if (k === "renderThumbnails" || k === "softwareCanvas") {
           p.renderHook?.refreshAllViewers?.(true);
+        } else if (k === "liteOverlayBlend" || k === "longDocCssOpt" || k === "deferTextLayerOnScroll") {
+          p.renderHook?.applyViewerOpts?.();
         }
         setToast(`已更新 MuPDF 渲染设置: ${k}`);
         refreshStats();
@@ -428,6 +445,22 @@ var ZotTurboPrefs = (function () {
         };
         el.addEventListener("command", onScaleSelect);
         el.addEventListener("change", onScaleSelect);
+      }
+    }
+    {
+      const el = $(`zt-mupdf-${MUPDF_MENULIST_MP_KEY}`);
+      if (el) {
+        const onMpSelect = () => {
+          const p = plugin();
+          if (!p) return;
+          const raw = String(el.value || "native");
+          const stored = raw === "native" ? "" : raw;
+          p.setMuPDFPref(MUPDF_MENULIST_MP_KEY, stored);
+          p.renderHook?.refreshAllViewers?.(true);
+          setToast(`4K 单页像素上限已更新为 ${stored ? stored + " MP" : "不限制"}`);
+        };
+        el.addEventListener("command", onMpSelect);
+        el.addEventListener("change", onMpSelect);
       }
     }
 

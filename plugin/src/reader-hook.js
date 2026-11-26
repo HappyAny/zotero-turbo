@@ -15,10 +15,11 @@ var ZotMuPDFReaderHook = (function () {
   }
 
   class ReaderHook {
-    constructor({ pluginID, rootURI, engineClient, renderIdleSleepMs = 300000 }) {
+    constructor({ pluginID, rootURI, engineClient, getPref = null, renderIdleSleepMs = 300000 }) {
       this.pluginID = pluginID;
       this.rootURI = rootURI;
       this.engine = engineClient;
+      this.getPref = typeof getPref === "function" ? getPref : (_k, d) => d;
       this.renderIdleSleepMs = Math.max(0, Number(renderIdleSleepMs) || 0);
       this._renderSleepTimer = null;
       this._scanTimer = null;
@@ -28,8 +29,10 @@ var ZotMuPDFReaderHook = (function () {
       this.viewerEntries = new Set(); // { viewerWin, rawWin, viewerKey, onUnload }
       this.toolbarButtons = new Set(); // { doc, btn, dot, nameEl, metricEl }
       this.thumbHooks = new Set(); // { rawPv, origInitThumbnails, rawThumbs, origRender, origConcurrency }
+      this.viewStatsHooks = new Set(); // { iframeWin, rawPv, origUpdateViewStats, wrappedUpdateViewStats, trailTimer }
       this._hookedPvs = new WeakSet();
       this._hookedThumbs = new WeakSet();
+      this._hookedViewStats = new WeakSet();
       this._thumbScratchCanvas = null;
       this._thumbScratchCtx = null;
       this.nextViewerId = 1;
@@ -186,6 +189,15 @@ var ZotMuPDFReaderHook = (function () {
           this._disposeThumbHook(th, false);
         }
       }
+      for (const vh of Array.from(this.viewStatsHooks)) {
+        try {
+          if (!vh.iframeWin || vh.iframeWin.closed) {
+            this._disposeViewStatsHook(vh, false);
+          }
+        } catch {
+          this._disposeViewStatsHook(vh, false);
+        }
+      }
       for (const entry of Array.from(this.viewerEntries)) {
         try {
           if (!entry.viewerWin || entry.viewerWin.closed) {
@@ -225,6 +237,100 @@ var ZotMuPDFReaderHook = (function () {
       th.origRender = null;
       th.wrappedRender = null;
       th.iframeWin = null;
+    }
+
+    _disposeViewStatsHook(vh, restoreOrig = true) {
+      if (!vh) return;
+      this.viewStatsHooks.delete(vh);
+      if (vh.trailTimer) {
+        clearTimeout(vh.trailTimer);
+        vh.trailTimer = null;
+      }
+      if (restoreOrig) {
+        try {
+          const alive = vh.iframeWin && !vh.iframeWin.closed;
+          if (alive && vh.rawPv && vh.origUpdateViewStats && vh.rawPv._updateViewStats === vh.wrappedUpdateViewStats) {
+            vh.rawPv._updateViewStats = vh.origUpdateViewStats;
+          }
+        } catch {}
+      }
+      vh.rawPv = null;
+      vh.origUpdateViewStats = null;
+      vh.wrappedUpdateViewStats = null;
+      vh.iframeWin = null;
+    }
+
+    _hookLongDocScrollViews(state) {
+      if (this._destroyed || !state?.iframeWin || state.iframeWin.closed) return;
+      try {
+        const rawInternal = state.reader?._internalReader?.wrappedJSObject || state.reader?._internalReader;
+        if (!rawInternal) return;
+        const views = [rawInternal._primaryView, rawInternal._secondaryView];
+        for (const v of views) {
+          const rawPv = v?.wrappedJSObject || v;
+          if (!rawPv || this._hookedViewStats.has(rawPv) || typeof rawPv._updateViewStats !== "function") {
+            continue;
+          }
+          this._hookedViewStats.add(rawPv);
+          const origUpdateViewStats = rawPv._updateViewStats;
+          const iframeWin = state.iframeWin;
+          const entry = {
+            iframeWin,
+            rawPv,
+            origUpdateViewStats,
+            wrappedUpdateViewStats: null,
+            trailTimer: null,
+            lastSig: "",
+            lastRunAt: 0,
+            coalescedCount: 0,
+          };
+          const self = this;
+          const wrapped = Cu.exportFunction(function zotTurboUpdateViewStats() {
+            const pvSelf = this?.wrappedJSObject || this || rawPv;
+            if (self._destroyed || !self.getPref("longDocScrollOpt", true)) {
+              return origUpdateViewStats.apply(pvSelf, arguments);
+            }
+            try {
+              const viewer = pvSelf._iframeWindow?.PDFViewerApplication?.pdfViewer;
+              if (viewer && pvSelf._scrolling) {
+                const sig = `${viewer.currentPageNumber}|${viewer.currentScaleValue}|${viewer.pagesCount}|${viewer.scrollMode}|${viewer.spreadMode}`;
+                const tNow = nowMs();
+                if (sig === entry.lastSig && tNow - entry.lastRunAt < 140) {
+                  entry.coalescedCount++;
+                  if (!entry.trailTimer) {
+                    entry.trailTimer = setTimeout(() => {
+                      entry.trailTimer = null;
+                      if (!self._destroyed && iframeWin && !iframeWin.closed) {
+                        try {
+                          entry.lastRunAt = nowMs();
+                          origUpdateViewStats.call(pvSelf);
+                        } catch {}
+                      }
+                    }, 160);
+                  }
+                  return;
+                }
+                entry.lastSig = sig;
+                entry.lastRunAt = tNow;
+              } else if (viewer) {
+                entry.lastSig = `${viewer.currentPageNumber}|${viewer.currentScaleValue}|${viewer.pagesCount}|${viewer.scrollMode}|${viewer.spreadMode}`;
+                entry.lastRunAt = nowMs();
+              }
+              if (entry.trailTimer) {
+                clearTimeout(entry.trailTimer);
+                entry.trailTimer = null;
+              }
+            } catch {}
+            return origUpdateViewStats.apply(pvSelf, arguments);
+          }, iframeWin);
+          entry.wrappedUpdateViewStats = wrapped;
+          rawPv._updateViewStats = wrapped;
+          this.viewStatsHooks.add(entry);
+          if (state.viewStatsHooks) state.viewStatsHooks.add(entry);
+        }
+      } catch (e) {
+        this.engine.log("hookLongDocScrollViews error:", e?.message || String(e));
+      }
     }
 
     _clearRenderSleepTimer() {
@@ -274,6 +380,7 @@ var ZotMuPDFReaderHook = (function () {
         unloadHandler: null,
         attachedWins: new WeakSet(),
         thumbHooks: new Set(),
+        viewStatsHooks: new Set(),
         viewerEntries: new Set(),
       };
       this.readerStates.set(key, state);
@@ -410,6 +517,7 @@ var ZotMuPDFReaderHook = (function () {
           }
         }
         this._hookPrimaryThumbnails(state);
+        this._hookLongDocScrollViews(state);
       } catch (e) {
         this.engine.log("scanReaderViews error:", e?.message || String(e));
       }
@@ -863,8 +971,8 @@ var ZotMuPDFReaderHook = (function () {
                       res.height
                     );
                     if (shouldSlice) {
-                      // Use 6 strips for giant 2.8K/4K canvases (>4.5MP) so each strip stays <5ms inside 120Hz frames
-                      const STRIPS = res.width * res.height >= 4500000 ? 6 : 4;
+                      // Use 6 strips only for huge canvases (>=6MP), 4 strips for 1.5-6MP to stay within 120Hz frames
+                      const STRIPS = res.width * res.height >= 6000000 ? 6 : 4;
                       const yieldNextFrame = () =>
                         new Promise(resolve => {
                           let done = false;
@@ -1003,6 +1111,12 @@ var ZotMuPDFReaderHook = (function () {
         }
         state.thumbHooks.clear();
       }
+      if (state.viewStatsHooks) {
+        for (const vh of Array.from(state.viewStatsHooks)) {
+          this._disposeViewStatsHook(vh, true);
+        }
+        state.viewStatsHooks.clear();
+      }
 
       if (state.viewerEntries) {
         for (const entry of Array.from(state.viewerEntries)) {
@@ -1060,7 +1174,20 @@ var ZotMuPDFReaderHook = (function () {
             this.viewerEntries.delete(entry);
             continue;
           }
+          entry.rawWin.__zotMuPDFControl?.applyRuntimeOpts?.();
           entry.rawWin.__zotMuPDFControl?.refreshAllPages?.(coldReset);
+        } catch {}
+      }
+    }
+
+    applyViewerOpts() {
+      for (const entry of Array.from(this.viewerEntries)) {
+        try {
+          if (entry.viewerWin.closed) {
+            this.viewerEntries.delete(entry);
+            continue;
+          }
+          entry.rawWin.__zotMuPDFControl?.applyRuntimeOpts?.();
         } catch {}
       }
     }
@@ -1691,11 +1818,15 @@ var ZotMuPDFReaderHook = (function () {
         this._wrappedReaderOpenPreview = null;
       }
 
-      // Restore Zotero's original PDFThumbnails methods & concurrency
+      // Restore Zotero's original PDFThumbnails & PDFView._updateViewStats hooks
       for (const th of Array.from(this.thumbHooks)) {
         this._disposeThumbHook(th, true);
       }
       this.thumbHooks.clear();
+      for (const vh of Array.from(this.viewStatsHooks)) {
+        this._disposeViewStatsHook(vh, true);
+      }
+      this.viewStatsHooks.clear();
 
       if (this._thumbScratchCanvas) {
         try {

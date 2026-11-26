@@ -100,8 +100,20 @@
         <html:input id="zt-mupdf-prerender" type="checkbox"/>
         <html:span>开启方向感知后台预渲染 (最低优先级预渲 +1/+2/-1 页，前台活跃自动让步)</html:span>
       </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-liteOverlayBlend" type="checkbox"/>
+        <html:span>4K 120Hz 合成加速：去引文提示框 &amp; 滚动期离屏混合 (消除核显 WebRender 4K 回读卡顿，停稳自动恢复高亮正片叠底)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-longDocCssOpt" type="checkbox"/>
+        <html:span>长文档 CSS 布局隔离与轻量页面阴影 (contain: layout style 隔离数百页重排，显著提速 100–800 页长文)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-mupdf-deferTextLayerOnScroll" type="checkbox"/>
+        <html:span>快速滚动期间延迟挂载文本层与无障碍树 (停稳 140ms 自动补齐，翻长文稳住 120Hz 且不影响划词/翻译)</html:span>
+      </html:label>
 
-      <html:div class="zt-row-grid">
+      <html:div class="zt-row-grid zt-row-grid-3">
         <html:div class="zt-field">
           <html:span class="zt-field-label">抗锯齿等级 (AA Level)</html:span>
           <menulist id="zt-mupdf-aaLevel" native="true" class="zt-menulist">
@@ -119,9 +131,20 @@
           <menulist id="zt-mupdf-maxOutputScale" native="true" class="zt-menulist">
             <menupopup>
               <menuitem value="native" label="原生满分辨率 (最清晰)"/>
-              <menuitem value="1.5" label="1.5× (推荐 2K/4K 高刷屏，省 44% 显存与耗时)"/>
+              <menuitem value="1.5" label="1.5× (推荐 2K/4K 高刷屏)"/>
               <menuitem value="1.25" label="1.25× (轻量极速)"/>
               <menuitem value="1.0" label="1.0× (最低显存)"/>
+            </menupopup>
+          </menulist>
+        </html:div>
+        <html:div class="zt-field">
+          <html:span class="zt-field-label">4K 单页总像素上限 (控显存)</html:span>
+          <menulist id="zt-mupdf-maxPageMegapixels" native="true" class="zt-menulist">
+            <menupopup>
+              <menuitem value="native" label="不限制 (原生满像素)"/>
+              <menuitem value="6.0" label="6.0 MP (4K 超清)"/>
+              <menuitem value="4.5" label="4.5 MP (推荐 4K 120Hz，省 45% 显存)"/>
+              <menuitem value="3.2" label="3.2 MP (核显极速)"/>
             </menupopup>
           </menulist>
         </html:div>
@@ -205,6 +228,10 @@
       <html:label class="zt-row-check">
         <html:input id="zt-pref-startupHibernateBackgroundTabs" type="checkbox"/>
         <html:span>启动时自动休眠所有后台恢复 PDF 标签 (仅保留当前激活标签，点回时由 MuPDF 毫秒级恢复)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-trimBackgroundTabCanvas" type="checkbox"/>
+        <html:span>切走 PDF 标签 15 秒后自动裁剪后台离屏画布 (大幅降低 4K GPU 显存占用，切回零闪烁不丢进度)</html:span>
       </html:label>
       <html:div class="zt-row-grid">
         <html:label class="zt-field">
@@ -310,6 +337,10 @@
       <html:label class="zt-row-check">
         <html:input id="zt-pref-itemSelectCoalesceEnabled" type="checkbox"/>
         <html:span>连续快速切文献合并防抖 (单击文献 0 延迟秒开，长按方向键或快速连点时自动合并中间冗余的右侧栏与插件重绘)</html:span>
+      </html:label>
+      <html:label class="zt-row-check">
+        <html:input id="zt-pref-longDocScrollOpt" type="checkbox"/>
+        <html:span>长论文 120Hz 滚动节流 (同页连续滚动时跳过重复大纲树遍历与状态重算，翻页零延迟)</html:span>
       </html:label>
       <html:div class="zt-row-grid">
         <html:label class="zt-field">

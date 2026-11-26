@@ -219,11 +219,18 @@ var ZotMuPDFEngineClient = (function () {
     getConfig() {
       const rawMaxScale = Number(getPref("maxOutputScale", ""));
       const maxOutputScale = Number.isFinite(rawMaxScale) && rawMaxScale >= 0.75 ? rawMaxScale : 0;
+      const rawMaxMP = getPref("maxPageMegapixels", "4.5");
+      const parsedMaxMP = rawMaxMP === "" || rawMaxMP === "native" ? 0 : Number(rawMaxMP);
+      const maxPageMegapixels = Number.isFinite(parsedMaxMP) && parsedMaxMP >= 1.5 ? parsedMaxMP : 0;
       return {
         renderThumbnails: !!getPref("renderThumbnails", true),
         aaLevel: Number(getPref("aaLevel", 8)) || 8,
         softwareCanvas: this.useSoftwareCanvas(),
         maxOutputScale,
+        maxPageMegapixels,
+        liteOverlayBlend: !!getPref("liteOverlayBlend", true),
+        longDocCssOpt: !!getPref("longDocCssOpt", true),
+        deferTextLayerOnScroll: !!getPref("deferTextLayerOnScroll", true),
         debugLog: !!getPref("debugLog", false),
       };
     }
@@ -414,7 +421,7 @@ var ZotMuPDFEngineClient = (function () {
       this.dllPath = dllPath;
 
       const storeMB = Number(getPref("storeMB", 96)) || 96;
-      const pixCacheMB = Number(getPref("pixCacheMB", 96)) || 96;
+      const pixCacheMB = Number(getPref("pixCacheMB", 128)) || 128;
       const bgPref = getPref("bgWorkers", 1);
       const bgWorkers = getPref("prerender", true) ? Math.max(0, Math.min(4, Number.isFinite(Number(bgPref)) ? Number(bgPref) : 1)) : 0;
       const fgWorkers = Math.max(1, Math.min(4, Number(getPref("workers", 2)) || 2));
